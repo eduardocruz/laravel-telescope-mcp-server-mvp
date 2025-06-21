@@ -10,6 +10,9 @@
     "require-dev": {
         "vlucas/phpdotenv": "^5.5"
     },
+    "bin": [
+        "bin/laravel-telescope-mcp-server"
+    ],
     "autoload": {
         "psr-4": {
             "TelescopeMcp\\": "src/"
