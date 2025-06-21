@@ -31,27 +31,41 @@ if (file_exists(__DIR__ . '/.env')) {
 }
 
 use PhpMcp\Server\Server;
-use PhpMcp\Server\Defaults\StreamLogger;
+use PhpMcp\Server\Transports\StdioServerTransport;
 use TelescopeMcp\TelescopeTools;
+use Psr\Log\AbstractLogger;
+
+// Simple logger that writes to stderr
+class StderrLogger extends AbstractLogger
+{
+    public function log($level, \Stringable|string $message, array $context = []): void
+    {
+        fwrite(STDERR, sprintf("MCP: [%s][%s] %s %s\n", date('Y-m-d H:i:s'), strtoupper($level), $message, empty($context) ? '' : json_encode($context)));
+    }
+}
 
 // Create the tools class
 require_once __DIR__ . '/src/TelescopeTools.php';
 require_once __DIR__ . '/src/Database.php';
 
-// Set up logger
-$logger = new StreamLogger(__DIR__.'/mcp.log', 'info');
+try {
+    $logger = new StderrLogger();
+    $logger->info('Starting Laravel Telescope MCP Server...');
 
-// Create MCP server with correct v1.0 syntax
-$server = Server::make()
-    ->withBasePath(__DIR__)
-    ->withLogger($logger)
-    ->withTool([TelescopeTools::class, 'helloWorld'], 'hello_world', 'A simple hello world test')
-    ->withTool([TelescopeTools::class, 'telescopeStatus'], 'telescope_status', 'Check Laravel Telescope database connection and status')
-    ->withTool([TelescopeTools::class, 'getRecentEntries'], 'get_recent_entries', 'Get recent telescope entries for testing')
-    ->withTool([TelescopeTools::class, 'telescopeRecentRequests'], 'telescope_recent_requests', 'List recent HTTP requests from Laravel Telescope')
-    ->withTool([TelescopeTools::class, 'telescopeSlowQueries'], 'telescope_slow_queries', 'Find slow database queries from Laravel Telescope');
+    // Create MCP server with the available methods
+    $server = Server::make()
+        ->withLogger($logger)
+        ->withTool([TelescopeTools::class, 'helloWorld'], 'hello_world', 'A simple hello world test')
+        ->withTool([TelescopeTools::class, 'telescopeStatus'], 'telescope_status', 'Check Laravel Telescope database connection and status')
+        ->withTool([TelescopeTools::class, 'getRecentEntries'], 'get_recent_entries', 'Get recent telescope entries for testing')
+        ->withTool([TelescopeTools::class, 'telescopeRecentRequests'], 'telescope_recent_requests', 'List recent HTTP requests from Laravel Telescope')
+        ->withTool([TelescopeTools::class, 'telescopeSlowQueries'], 'telescope_slow_queries', 'Find slow database queries from Laravel Telescope');
 
-// Start the server with stdio transport
-$exitCode = $server->run('stdio');
+    // Start the server with stdio transport
+    $exitCode = $server->run('stdio');
+    exit($exitCode);
 
-exit($exitCode); 
+} catch (\Throwable $e) {
+    fwrite(STDERR, "[MCP SERVER CRITICAL ERROR]\n".$e."\n");
+    exit(1);
+} 
