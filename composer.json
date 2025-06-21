@@ -1,5 +1,5 @@
 {
-    "name": "eduardocruz/laravel-telescope-mcp-server",
+    "name": "eduardocruz/laravel-telescope-mcp-server-mvp",
     "description": "A PHP MCP server for Laravel Telescope integration with Cursor IDE",
     "type": "project",
     "license": "MIT",
