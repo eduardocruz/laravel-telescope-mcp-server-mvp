@@ -185,6 +185,57 @@ class Database
     }
 
     /**
+     * Get slow database queries from telescope
+     * 
+     * @param int $threshold Minimum duration in milliseconds
+     * @param int $limit Number of queries to retrieve
+     * @return array Array of slow query entries with parsed data
+     * @throws Exception If query fails
+     */
+    public function getSlowQueries(int $threshold = 100, int $limit = 10): array
+    {
+        $this->connect();
+
+        try {
+            $stmt = $this->pdo->prepare("
+                SELECT uuid, content, created_at 
+                FROM telescope_entries 
+                WHERE type = 'query'
+                AND CAST(JSON_EXTRACT(content, '$.time') AS DECIMAL(10,2)) > ?
+                ORDER BY CAST(JSON_EXTRACT(content, '$.time') AS DECIMAL(10,2)) DESC
+                LIMIT ?
+            ");
+            
+            $stmt->bindValue(1, $threshold, PDO::PARAM_INT);
+            $stmt->bindValue(2, $limit, PDO::PARAM_INT);
+            $stmt->execute();
+            
+            $entries = $stmt->fetchAll();
+            $queries = [];
+            
+            foreach ($entries as $entry) {
+                $content = json_decode($entry['content'], true);
+                
+                if (is_array($content)) {
+                    $queries[] = [
+                        'uuid' => $entry['uuid'],
+                        'sql' => $content['sql'] ?? 'UNKNOWN',
+                        'duration' => $content['time'] ?? $content['duration'] ?? null,
+                        'created_at' => $entry['created_at'],
+                        'connection_name' => $content['connection_name'] ?? null,
+                        'bindings' => $content['bindings'] ?? []
+                    ];
+                }
+            }
+            
+            return $queries;
+            
+        } catch (PDOException $e) {
+            throw new Exception("Failed to fetch slow queries: " . $e->getMessage());
+        }
+    }
+
+    /**
      * Get database connection info
      * 
      * @return array Connection details

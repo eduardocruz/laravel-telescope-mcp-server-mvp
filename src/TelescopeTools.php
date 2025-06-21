@@ -218,6 +218,79 @@ class TelescopeTools
     }
 
     /**
+     * Find slow database queries from Laravel Telescope
+     * 
+     * @param int $threshold Minimum duration in milliseconds (default: 100)
+     * @param int $limit Number of queries to retrieve (default: 10)
+     * @return array MCP response format
+     */
+    public function telescopeSlowQueries(int $threshold = 100, int $limit = 10): array
+    {
+        try {
+            $queries = $this->database->getSlowQueries($threshold, $limit);
+            
+            if (empty($queries)) {
+                return [
+                    'content' => [
+                        [
+                            'type' => 'text',
+                            'text' => "📊 No slow queries found above {$threshold}ms threshold."
+                        ]
+                    ]
+                ];
+            }
+            
+            $text = "🐌 Slow Database Queries (>{$threshold}ms, showing " . count($queries) . " of {$limit}):\n\n";
+            
+            foreach ($queries as $query) {
+                $duration = $query['duration'] ?? 'Unknown';
+                $text .= "⏱️ Duration: {$duration}ms\n";
+                $text .= "📅 Time: {$query['created_at']}\n";
+                
+                if ($query['connection_name']) {
+                    $text .= "🔗 Connection: {$query['connection_name']}\n";
+                }
+                
+                // Format SQL query for better readability
+                $sql = $query['sql'];
+                if (strlen($sql) > 200) {
+                    $sql = substr($sql, 0, 200) . '...';
+                }
+                $text .= "💾 SQL: " . trim($sql) . "\n";
+                
+                // Show bindings if available
+                if (!empty($query['bindings'])) {
+                    $bindings = is_array($query['bindings']) ? 
+                        implode(', ', array_slice($query['bindings'], 0, 5)) : 
+                        $query['bindings'];
+                    $text .= "🔗 Bindings: " . $bindings . "\n";
+                }
+                
+                $text .= "🆔 UUID: " . substr($query['uuid'], 0, 8) . "...\n\n";
+            }
+            
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => $text
+                    ]
+                ]
+            ];
+            
+        } catch (Exception $e) {
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => "❌ Failed to fetch slow queries: " . $e->getMessage()
+                    ]
+                ]
+            ];
+        }
+    }
+
+    /**
      * Get status icon based on HTTP status code
      * 
      * @param int|null $status HTTP status code
