@@ -5,8 +5,9 @@ declare(strict_types=1);
 // Try to find the autoloader in different locations
 $autoloadPaths = [
     __DIR__ . '/vendor/autoload.php',           // When running from project root
-    __DIR__ . '/../../../autoload.php',        // When installed as dependency
-    __DIR__ . '/../../vendor/autoload.php',    // Alternative location
+    __DIR__ . '/../../autoload.php',           // When installed as dependency (vendor/eduardocruz/package-name/)
+    __DIR__ . '/../../../autoload.php',        // Alternative dependency location
+    __DIR__ . '/../../vendor/autoload.php',    // Another alternative location
 ];
 
 $autoloaderFound = false;
