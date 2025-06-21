@@ -1,0 +1,40 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Find the autoloader
+$autoloadPaths = [
+    __DIR__ . '/../vendor/autoload.php',
+    __DIR__ . '/../../../autoload.php',
+    __DIR__ . '/../../vendor/autoload.php',
+    __DIR__ . '/../autoload.php'
+];
+
+$autoloadPath = null;
+foreach ($autoloadPaths as $path) {
+    if (file_exists($path)) {
+        $autoloadPath = $path;
+        break;
+    }
+}
+
+if (!$autoloadPath) {
+    fwrite(STDERR, "Error: Could not find vendor/autoload.php\n");
+    exit(1);
+}
+
+require_once $autoloadPath;
+
+// Find the base directory (where server.php should be)
+$baseDir = dirname(__DIR__);
+$serverPath = $baseDir . '/server.php';
+
+if (!file_exists($serverPath)) {
+    fwrite(STDERR, "Error: Could not find server.php at $serverPath\n");
+    exit(1);
+}
+
+// Change to the base directory and include server.php
+chdir($baseDir);
+require $serverPath;

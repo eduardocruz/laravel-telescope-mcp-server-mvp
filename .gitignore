@@ -26,5 +26,9 @@ Thumbs.db
 /tmp/
 
 # Test files
-test-basic.php
+test-*.php
 cursor-mcp-config.json
+
+# Build artifacts
+*.phar
+build-phar.php
