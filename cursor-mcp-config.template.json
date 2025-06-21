@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "laravel-telescope": {
+      "command": "php",
+      "args": ["/FULL/PATH/TO/laravel-telescope-mcp-server/server.php"],
+      "env": {
+        "DB_HOST": "127.0.0.1",
+        "DB_PORT": "3306",
+        "DB_DATABASE": "your_laravel_database",
+        "DB_USERNAME": "your_db_username",
+        "DB_PASSWORD": "your_db_password",
+        "MCP_SERVER_NAME": "Laravel Telescope MCP Server"
+      }
+    }
+  }
+} 
