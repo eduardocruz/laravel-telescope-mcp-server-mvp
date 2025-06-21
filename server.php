@@ -2,7 +2,26 @@
 
 declare(strict_types=1);
 
-require_once __DIR__ . '/vendor/autoload.php';
+// Try to find the autoloader in different locations
+$autoloadPaths = [
+    __DIR__ . '/vendor/autoload.php',           // When running from project root
+    __DIR__ . '/../../../autoload.php',        // When installed as dependency
+    __DIR__ . '/../../vendor/autoload.php',    // Alternative location
+];
+
+$autoloaderFound = false;
+foreach ($autoloadPaths as $autoloadPath) {
+    if (file_exists($autoloadPath)) {
+        require_once $autoloadPath;
+        $autoloaderFound = true;
+        break;
+    }
+}
+
+if (!$autoloaderFound) {
+    fwrite(STDERR, "Error: Could not find autoloader. Please run 'composer install'.\n");
+    exit(1);
+}
 
 // Load environment variables if .env file exists
 if (file_exists(__DIR__ . '/.env')) {
