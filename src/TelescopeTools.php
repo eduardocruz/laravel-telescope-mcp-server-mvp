@@ -922,6 +922,238 @@ class TelescopeTools
     }
 
     /**
+     * Track user activity and behavior patterns from Laravel Telescope
+     * 
+     * @param int|null $userId Specific user ID to track
+     * @param int $limit Number of activities to retrieve (default: 20)
+     * @param int $hours Time window for analysis in hours (default: 24)
+     * @param bool $includeAnonymous Include non-authenticated requests (default: false)
+     * @param bool $suspiciousOnly Show only potentially suspicious activity (default: false)
+     * @return array MCP response format
+     */
+    public function telescopeUserActivity(
+        ?int $userId = null, 
+        int $limit = 20, 
+        int $hours = 24, 
+        bool $includeAnonymous = false, 
+        bool $suspiciousOnly = false
+    ): array {
+        try {
+            $activities = $this->database->getUserActivity($userId, $limit, $hours, $includeAnonymous, $suspiciousOnly);
+            $stats = $this->database->getUserActivityStats($userId, $hours);
+            
+            if (empty($activities) && $stats['total_requests'] === 0) {
+                $filterInfo = $this->buildUserActivityFilterInfo($userId, $hours, $includeAnonymous, $suspiciousOnly);
+                return [
+                    'content' => [
+                        [
+                            'type' => 'text',
+                            'text' => "📭 No user activity found{$filterInfo}."
+                        ]
+                    ]
+                ];
+            }
+            
+            $text = $this->formatUserActivityOutput($activities, $stats, $userId, $limit, $hours, $includeAnonymous, $suspiciousOnly);
+            
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => $text
+                    ]
+                ]
+            ];
+            
+        } catch (Exception $e) {
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => "❌ Failed to fetch user activity: " . $e->getMessage()
+                    ]
+                ]
+            ];
+        }
+    }
+
+    /**
+     * Format user activity output for display
+     */
+    private function formatUserActivityOutput(array $activities, array $stats, ?int $userId, int $limit, int $hours, bool $includeAnonymous, bool $suspiciousOnly): string
+    {
+        $filterInfo = $this->buildUserActivityFilterInfo($userId, $hours, $includeAnonymous, $suspiciousOnly);
+        $count = count($activities);
+        
+        $text = "👤 User Activity Monitor{$filterInfo}:\n\n";
+        
+        // Add user summary if tracking specific user
+        if ($userId !== null && $stats['total_requests'] > 0) {
+            $text .= "🔍 User #{$userId}:\n";
+            $text .= "   Total Requests: " . number_format($stats['total_requests']) . "\n";
+            $text .= "   Unique IPs: {$stats['unique_ips']}\n";
+            $text .= "   Session Duration: {$stats['session_duration']['formatted']}\n";
+            $text .= "   Last Active: {$stats['last_activity']}\n";
+            
+            if ($stats['error_rate'] > 0) {
+                $text .= "   Error Rate: {$stats['error_rate']}% ({$stats['error_count']}/{$stats['total_requests']} requests)\n";
+            }
+            
+            $text .= "\n";
+        } elseif ($userId === null && $stats['total_requests'] > 0) {
+            // General statistics for all users
+            $text .= "📊 Activity Summary:\n";
+            $text .= "   Total Requests: " . number_format($stats['total_requests']) . "\n";
+            $text .= "   Active Users: {$stats['unique_users']}\n";
+            $text .= "   Unique IPs: {$stats['unique_ips']}\n";
+            $text .= "   Average Response: {$stats['avg_duration']}ms\n";
+            
+            if ($stats['error_rate'] > 0) {
+                $text .= "   Error Rate: {$stats['error_rate']}% ({$stats['error_count']}/{$stats['total_requests']} requests)\n";
+            }
+            
+            $text .= "\n";
+        }
+        
+        if (!empty($activities)) {
+            $text .= "Recent Activity (showing {$count}):\n\n";
+            
+            foreach ($activities as $activity) {
+                $statusIcon = $this->getActivityStatusIcon($activity);
+                $methodUri = "{$activity['method']} {$activity['uri']}";
+                
+                // Add suspicious flag if detected
+                if ($activity['suspicious']) {
+                    $methodUri .= " (SUSPICIOUS)";
+                }
+                
+                $text .= "{$statusIcon} {$methodUri}\n";
+                
+                // Show user ID for multi-user view
+                if ($userId === null && $activity['user_id']) {
+                    $text .= "   User: #{$activity['user_id']}\n";
+                }
+                
+                // Show IP address
+                if ($activity['ip_address']) {
+                    $text .= "   IP: {$activity['ip_address']}\n";
+                }
+                
+                // Show status and duration
+                if ($activity['status']) {
+                    $text .= "   Status: {$activity['status']}\n";
+                }
+                
+                if ($activity['duration']) {
+                    $text .= "   Duration: {$activity['duration']}ms\n";
+                }
+                
+                // Show suspicious details
+                if ($activity['suspicious']) {
+                    $suspiciousReasons = $this->getSuspiciousReasons($activity);
+                    if (!empty($suspiciousReasons)) {
+                        $text .= "   ⚠️ Flags: " . implode(', ', $suspiciousReasons) . "\n";
+                    }
+                }
+                
+                $text .= "   Time: {$activity['created_at']}\n";
+                $text .= "   UUID: " . substr($activity['uuid'], 0, 8) . "...\n\n";
+            }
+        }
+        
+        // Add top URIs summary if available
+        if (!empty($stats['top_uris'])) {
+            $text .= "📈 Most Visited:\n";
+            foreach (array_slice($stats['top_uris'], 0, 3) as $uri) {
+                $text .= "   {$uri['uri']} ({$uri['visits']} times)\n";
+            }
+        }
+        
+        return $text;
+    }
+
+    /**
+     * Build filter information string for user activity output
+     */
+    private function buildUserActivityFilterInfo(?int $userId, int $hours, bool $includeAnonymous, bool $suspiciousOnly): string
+    {
+        $filters = [];
+        
+        if ($userId !== null) {
+            $filters[] = "user: #{$userId}";
+        }
+        
+        if ($suspiciousOnly) {
+            $filters[] = "suspicious only";
+        }
+        
+        if ($includeAnonymous) {
+            $filters[] = "including anonymous";
+        }
+        
+        if ($hours !== 24) {
+            $filters[] = "last {$hours}h";
+        } else {
+            $filters[] = "last 24h";
+        }
+        
+        return !empty($filters) ? " (" . implode(', ', $filters) . ")" : "";
+    }
+
+    /**
+     * Get appropriate icon for activity status
+     */
+    private function getActivityStatusIcon(array $activity): string
+    {
+        if ($activity['suspicious']) {
+            return '⚠️';
+        }
+        
+        $status = $activity['status'] ?? 0;
+        
+        if ($status >= 200 && $status < 300) {
+            return '✅'; // Success
+        } elseif ($status >= 300 && $status < 400) {
+            return '🔄'; // Redirect
+        } elseif ($status >= 400 && $status < 500) {
+            return '❌'; // Client Error
+        } elseif ($status >= 500) {
+            return '💥'; // Server Error
+        }
+        
+        return '📊'; // Unknown/Info
+    }
+
+    /**
+     * Get reasons why activity is marked as suspicious
+     */
+    private function getSuspiciousReasons(array $activity): array
+    {
+        $reasons = [];
+        
+        $status = $activity['status'] ?? 0;
+        if ($status >= 400 && $status < 500) {
+            $reasons[] = 'Failed request';
+        }
+        
+        // Check for admin/sensitive endpoints
+        $sensitivePatterns = ['/admin', '/api/admin', '/dashboard/admin', '/user/delete', '/config'];
+        foreach ($sensitivePatterns as $pattern) {
+            if (str_contains($activity['uri'] ?? '', $pattern)) {
+                $reasons[] = 'Sensitive endpoint';
+                break;
+            }
+        }
+        
+        // Check for unusual response times
+        if (($activity['duration'] ?? 0) > 5000) {
+            $reasons[] = 'Slow response';
+        }
+        
+        return $reasons;
+    }
+
+    /**
      * Format exceptions output based on grouping preference
      */
     private function formatExceptionsOutput(array $exceptions, int $limit, ?string $level, ?string $since, ?string $groupBy): string

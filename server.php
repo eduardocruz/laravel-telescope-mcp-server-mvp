@@ -63,7 +63,8 @@ try {
         ->withTool([TelescopeTools::class, 'telescopePerformanceSummary'], 'telescope_performance_summary', 'Get comprehensive application performance dashboard from Laravel Telescope')
         ->withTool([TelescopeTools::class, 'telescopeExceptions'], 'telescope_exceptions', 'Track and analyze application exceptions and errors from Laravel Telescope')
         ->withTool([TelescopeTools::class, 'telescopeJobs'], 'telescope_jobs', 'Monitor job queue performance and status from Laravel Telescope')
-        ->withTool([TelescopeTools::class, 'telescopeCacheStats'], 'telescope_cache_stats', 'Analyze cache performance and statistics from Laravel Telescope');
+        ->withTool([TelescopeTools::class, 'telescopeCacheStats'], 'telescope_cache_stats', 'Analyze cache performance and statistics from Laravel Telescope')
+        ->withTool([TelescopeTools::class, 'telescopeUserActivity'], 'telescope_user_activity', 'Track user activity and behavior patterns from Laravel Telescope');
 
     // Start the server with stdio transport
     $exitCode = $server->run('stdio');

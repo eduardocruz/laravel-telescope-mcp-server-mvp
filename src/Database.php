@@ -926,6 +926,247 @@ class Database
     }
 
     /**
+     * Get user activity entries from telescope with filtering options
+     * 
+     * @param int|null $userId Specific user ID to track
+     * @param int $limit Number of activities to retrieve
+     * @param int $hours Time window for analysis in hours
+     * @param bool $includeAnonymous Include non-authenticated requests
+     * @param bool $suspiciousOnly Show only potentially suspicious activity
+     * @return array Array of user activity entries with parsed data
+     * @throws Exception If query fails
+     */
+    public function getUserActivity(?int $userId = null, int $limit = 20, int $hours = 24, bool $includeAnonymous = false, bool $suspiciousOnly = false): array
+    {
+        $this->connect();
+
+        try {
+            // Build the base query
+            $whereConditions = ["type = 'request'"];
+            $params = [];
+
+            // Add time filter
+            $whereConditions[] = "created_at >= DATE_SUB(NOW(), INTERVAL ? HOUR)";
+            $params[] = $hours;
+
+            // Add user filter
+            if ($userId !== null) {
+                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.user_id')) = ?";
+                $params[] = (string)$userId;
+            } elseif (!$includeAnonymous) {
+                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.user_id')) IS NOT NULL";
+            }
+
+            $whereClause = implode(' AND ', $whereConditions);
+
+            $stmt = $this->pdo->prepare("
+                SELECT uuid, content, created_at 
+                FROM telescope_entries 
+                WHERE {$whereClause}
+                ORDER BY created_at DESC 
+                LIMIT ?
+            ");
+            
+            $params[] = $limit;
+            $stmt->execute($params);
+            
+            $entries = $stmt->fetchAll();
+            $activities = [];
+            
+            foreach ($entries as $entry) {
+                $content = json_decode($entry['content'], true);
+                
+                if (is_array($content)) {
+                    $activity = [
+                        'uuid' => $entry['uuid'],
+                        'created_at' => $entry['created_at'],
+                        'user_id' => $content['user_id'] ?? null,
+                        'method' => $content['method'] ?? 'UNKNOWN',
+                        'uri' => $content['uri'] ?? 'UNKNOWN',
+                        'status' => $content['response_status'] ?? $content['status'] ?? null,
+                        'duration' => $content['duration'] ?? null,
+                        'ip_address' => $content['ip_address'] ?? null,
+                        'user_agent' => $content['user_agent'] ?? null,
+                        'session_id' => $content['session_id'] ?? null,
+                        'payload' => $content['payload'] ?? [],
+                        'response' => $content['response'] ?? []
+                    ];
+                    
+                    // Add suspicious activity detection
+                    $activity['suspicious'] = $this->detectSuspiciousActivity($activity, $content);
+                    
+                    // Filter suspicious only if requested
+                    if (!$suspiciousOnly || $activity['suspicious']) {
+                        $activities[] = $activity;
+                    }
+                }
+            }
+            
+            return $activities;
+            
+        } catch (PDOException $e) {
+            throw new Exception("Failed to fetch user activity: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Get user activity statistics for summary analysis
+     * 
+     * @param int|null $userId Specific user ID to analyze
+     * @param int $hours Time window for analysis in hours
+     * @return array User activity statistics
+     * @throws Exception If query fails
+     */
+    public function getUserActivityStats(?int $userId = null, int $hours = 24): array
+    {
+        $this->connect();
+
+        try {
+            $cutoffTime = date('Y-m-d H:i:s', strtotime("-{$hours} hours"));
+            
+            // Build base conditions
+            $whereConditions = ["type = 'request'", "created_at >= ?"];
+            $params = [$cutoffTime];
+            
+            if ($userId !== null) {
+                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.user_id')) = ?";
+                $params[] = (string)$userId;
+            } else {
+                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.user_id')) IS NOT NULL";
+            }
+            
+            $whereClause = implode(' AND ', $whereConditions);
+
+            // Get basic activity counts
+            $stmt = $this->pdo->prepare("
+                SELECT 
+                    COUNT(*) as total_requests,
+                    COUNT(DISTINCT JSON_UNQUOTE(JSON_EXTRACT(content, '$.ip_address'))) as unique_ips,
+                    COUNT(DISTINCT JSON_UNQUOTE(JSON_EXTRACT(content, '$.user_id'))) as unique_users,
+                    AVG(CAST(JSON_UNQUOTE(JSON_EXTRACT(content, '$.duration')) AS UNSIGNED)) as avg_duration,
+                    MIN(created_at) as first_activity,
+                    MAX(created_at) as last_activity
+                FROM telescope_entries 
+                WHERE {$whereClause}
+            ");
+            $stmt->execute($params);
+            $basicStats = $stmt->fetch();
+
+            // Get most visited URIs
+            $stmt = $this->pdo->prepare("
+                SELECT 
+                    JSON_UNQUOTE(JSON_EXTRACT(content, '$.uri')) as uri,
+                    COUNT(*) as visits
+                FROM telescope_entries 
+                WHERE {$whereClause}
+                GROUP BY JSON_UNQUOTE(JSON_EXTRACT(content, '$.uri'))
+                ORDER BY visits DESC
+                LIMIT 5
+            ");
+            $stmt->execute($params);
+            $topUris = $stmt->fetchAll();
+
+            // Get error rate
+            $stmt = $this->pdo->prepare("
+                SELECT 
+                    COUNT(*) as error_count
+                FROM telescope_entries 
+                WHERE {$whereClause}
+                AND CAST(JSON_UNQUOTE(JSON_EXTRACT(content, '$.response_status')) AS UNSIGNED) >= 400
+            ");
+            $stmt->execute($params);
+            $errorStats = $stmt->fetch();
+
+            $totalRequests = (int)$basicStats['total_requests'];
+            $errorCount = (int)$errorStats['error_count'];
+            
+            return [
+                'total_requests' => $totalRequests,
+                'unique_ips' => (int)$basicStats['unique_ips'],
+                'unique_users' => (int)$basicStats['unique_users'],
+                'avg_duration' => round((float)$basicStats['avg_duration'], 2),
+                'error_count' => $errorCount,
+                'error_rate' => $totalRequests > 0 ? round(($errorCount / $totalRequests) * 100, 1) : 0,
+                'first_activity' => $basicStats['first_activity'],
+                'last_activity' => $basicStats['last_activity'],
+                'top_uris' => $topUris,
+                'session_duration' => $this->calculateSessionDuration($basicStats['first_activity'], $basicStats['last_activity'])
+            ];
+            
+        } catch (PDOException $e) {
+            throw new Exception("Failed to fetch user activity statistics: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Detect suspicious activity patterns
+     */
+    private function detectSuspiciousActivity(array $activity, array $content): bool
+    {
+        // Check for failed authentication attempts
+        if (($activity['status'] ?? 0) >= 400 && ($activity['status'] ?? 0) < 500) {
+            return true;
+        }
+        
+        // Check for admin/sensitive endpoints
+        $sensitivePatterns = ['/admin', '/api/admin', '/dashboard/admin', '/user/delete', '/config'];
+        foreach ($sensitivePatterns as $pattern) {
+            if (str_contains($activity['uri'] ?? '', $pattern)) {
+                return true;
+            }
+        }
+        
+        // Check for unusual response times (> 5 seconds)
+        if (($activity['duration'] ?? 0) > 5000) {
+            return true;
+        }
+        
+        return false;
+    }
+
+    /**
+     * Calculate session duration between first and last activity
+     */
+    private function calculateSessionDuration(?string $firstActivity, ?string $lastActivity): array
+    {
+        if (!$firstActivity || !$lastActivity) {
+            return ['hours' => 0, 'minutes' => 0, 'seconds' => 0, 'formatted' => '0s'];
+        }
+        
+        $start = new \DateTime($firstActivity);
+        $end = new \DateTime($lastActivity);
+        $duration = $end->diff($start);
+        
+        return [
+            'hours' => $duration->h + ($duration->days * 24),
+            'minutes' => $duration->i,
+            'seconds' => $duration->s,
+            'formatted' => $this->formatSessionDuration($duration)
+        ];
+    }
+
+    /**
+     * Format session duration for display
+     */
+    private function formatSessionDuration(\DateInterval $duration): string
+    {
+        $parts = [];
+        
+        $totalHours = $duration->h + ($duration->days * 24);
+        if ($totalHours > 0) {
+            $parts[] = $totalHours . 'h';
+        }
+        if ($duration->i > 0) {
+            $parts[] = $duration->i . 'm';
+        }
+        if ($duration->s > 0 || empty($parts)) {
+            $parts[] = $duration->s . 's';
+        }
+        
+        return implode(' ', $parts);
+    }
+
+    /**
      * Close database connection
      */
     public function disconnect(): void
