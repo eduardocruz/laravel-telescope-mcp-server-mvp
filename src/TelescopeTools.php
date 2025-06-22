@@ -1292,4 +1292,295 @@ class TelescopeTools
         
         return '❓'; // Unknown
     }
+
+    /**
+     * Get detailed information for a specific exception from Laravel Telescope
+     * 
+     * @param string $exceptionId The UUID of the exception to analyze
+     * @param bool $includeContext Include request context when exception occurred (default: true)
+     * @param bool $includeRelated Include related entries from same request (default: true)
+     * @return array MCP response format
+     */
+    public function telescopeExceptionDetail(
+        string $exceptionId,
+        bool $includeContext = true,
+        bool $includeRelated = true
+    ): array {
+        try {
+            $exceptionDetail = $this->database->getExceptionDetail($exceptionId, $includeContext, $includeRelated);
+            
+            if (empty($exceptionDetail)) {
+                return [
+                    'content' => [
+                        [
+                            'type' => 'text',
+                            'text' => "❌ Exception not found with ID: " . substr($exceptionId, 0, 8) . "..."
+                        ]
+                    ]
+                ];
+            }
+            
+            $text = $this->formatExceptionDetailOutput($exceptionDetail, $includeContext, $includeRelated);
+            
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => $text
+                    ]
+                ]
+            ];
+            
+        } catch (Exception $e) {
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => "❌ Failed to fetch exception details: " . $e->getMessage()
+                    ]
+                ]
+            ];
+        }
+    }
+
+    /**
+     * Identify recurring exception patterns and trends from Laravel Telescope
+     * 
+     * @param string $timeWindow Time period for analysis (1h, 24h, 7d, 30d) (default: 24h)
+     * @param int $minOccurrences Minimum occurrences to be considered a pattern (default: 2)
+     * @param string $groupBy Group patterns by 'class', 'file', or 'line' (default: class)
+     * @return array MCP response format
+     */
+    public function telescopeExceptionPatterns(
+        string $timeWindow = '24h',
+        int $minOccurrences = 2,
+        string $groupBy = 'class'
+    ): array {
+        try {
+            $patterns = $this->database->getExceptionPatterns($timeWindow, $minOccurrences, $groupBy);
+            
+            if (empty($patterns)) {
+                return [
+                    'content' => [
+                        [
+                            'type' => 'text',
+                            'text' => "📊 No recurring exception patterns found in the last {$timeWindow} (minimum {$minOccurrences} occurrences)."
+                        ]
+                    ]
+                ];
+            }
+            
+            $text = $this->formatExceptionPatternsOutput($patterns, $timeWindow, $minOccurrences, $groupBy);
+            
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => $text
+                    ]
+                ]
+            ];
+            
+        } catch (Exception $e) {
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => "❌ Failed to analyze exception patterns: " . $e->getMessage()
+                    ]
+                ]
+            ];
+        }
+    }
+
+    /**
+     * Format detailed exception output for display
+     */
+    private function formatExceptionDetailOutput(array $detail, bool $includeContext, bool $includeRelated): string
+    {
+        $exception = $detail['exception'];
+        $levelIcon = $this->getExceptionLevelIcon($exception['level']);
+        
+        $text = "🔍 Exception Details:\n\n";
+        $text .= "{$levelIcon} {$exception['class']}: {$exception['message']}\n\n";
+        
+        // Basic exception info
+        $text .= "📋 Basic Information:\n";
+        $text .= "   UUID: {$exception['uuid']}\n";
+        $text .= "   Level: {$exception['level']}\n";
+        $text .= "   File: {$exception['file']}";
+        if ($exception['line'] > 0) {
+            $text .= ":{$exception['line']}";
+        }
+        $text .= "\n";
+        $text .= "   Time: {$exception['created_at']}\n\n";
+        
+        // Full stack trace
+        if (!empty($exception['trace'])) {
+            $text .= "📚 Stack Trace:\n";
+            $text .= $this->formatFullStackTrace($exception['trace']);
+            $text .= "\n";
+        }
+        
+        // Request context
+        if ($includeContext && !empty($detail['context'])) {
+            $context = $detail['context'];
+            $text .= "🌐 Request Context:\n";
+            $text .= "   Method: {$context['method']} {$context['uri']}\n";
+            $text .= "   Status: {$context['status']}\n";
+            $text .= "   Duration: {$context['duration']}ms\n";
+            if (!empty($context['user_id'])) {
+                $text .= "   User: #{$context['user_id']}\n";
+            }
+            $text .= "   IP: {$context['ip_address']}\n\n";
+        }
+        
+        // Related entries
+        if ($includeRelated && !empty($detail['related'])) {
+            $relatedCount = count($detail['related']);
+            $text .= "🔗 Related Entries ({$relatedCount} total):\n";
+            
+            foreach (array_slice($detail['related'], 0, 5) as $related) {
+                $typeIcon = $this->getEntryTypeIcon($related['type']);
+                $text .= "   {$typeIcon} {$related['type']}";
+                if (!empty($related['summary'])) {
+                    $text .= ": {$related['summary']}";
+                }
+                $text .= " ({$related['created_at']})\n";
+            }
+            
+            if (count($detail['related']) > 5) {
+                $text .= "   ... and " . (count($detail['related']) - 5) . " more entries\n";
+            }
+        }
+        
+        return $text;
+    }
+
+    /**
+     * Format exception patterns output for display
+     */
+    private function formatExceptionPatternsOutput(array $patterns, string $timeWindow, int $minOccurrences, string $groupBy): string
+    {
+        $count = count($patterns);
+        $text = "📊 Exception Patterns Analysis (last {$timeWindow}, grouped by {$groupBy}):\n\n";
+        $text .= "Found {$count} recurring pattern(s) with {$minOccurrences}+ occurrences:\n\n";
+        
+        foreach ($patterns as $pattern) {
+            $levelIcon = $this->getExceptionLevelIcon($pattern['level']);
+            $priorityIcon = $this->getPatternPriorityIcon($pattern['count'], $pattern['trend']);
+            
+            $text .= "{$priorityIcon} {$levelIcon} {$pattern['identifier']}\n";
+            $text .= "   Occurrences: " . number_format($pattern['count']) . " times\n";
+            $text .= "   Trend: {$pattern['trend']}\n";
+            $text .= "   First Seen: {$pattern['first_seen']}\n";
+            $text .= "   Last Seen: {$pattern['last_seen']}\n";
+            
+            if (!empty($pattern['message'])) {
+                $text .= "   Message: " . substr($pattern['message'], 0, 80);
+                if (strlen($pattern['message']) > 80) {
+                    $text .= "...";
+                }
+                $text .= "\n";
+            }
+            
+            if (!empty($pattern['files'])) {
+                $text .= "   Affected Files: " . implode(', ', array_slice($pattern['files'], 0, 3));
+                if (count($pattern['files']) > 3) {
+                    $text .= " (+" . (count($pattern['files']) - 3) . " more)";
+                }
+                $text .= "\n";
+            }
+            
+            $text .= "\n";
+        }
+        
+        // Add summary insights
+        $totalOccurrences = array_sum(array_column($patterns, 'count'));
+        $criticalPatterns = array_filter($patterns, fn($p) => in_array(strtolower($p['level']), ['critical', 'fatal', 'emergency']));
+        
+        $text .= "💡 Summary Insights:\n";
+        $text .= "   Total Exception Occurrences: " . number_format($totalOccurrences) . "\n";
+        $text .= "   Critical Patterns: " . count($criticalPatterns) . "\n";
+        $text .= "   Most Frequent: {$patterns[0]['identifier']} (" . number_format($patterns[0]['count']) . " times)\n";
+        
+        return $text;
+    }
+
+    /**
+     * Format full stack trace for detailed display
+     */
+    private function formatFullStackTrace($trace): string
+    {
+        if (is_string($trace)) {
+            return "   " . str_replace("\n", "\n   ", trim($trace)) . "\n";
+        }
+        
+        if (!is_array($trace)) {
+            return "   [Stack trace not available]\n";
+        }
+        
+        $text = "";
+        foreach (array_slice($trace, 0, 10) as $index => $frame) {
+            if (is_array($frame)) {
+                $file = $frame['file'] ?? 'unknown';
+                $line = $frame['line'] ?? 0;
+                $function = $frame['function'] ?? 'unknown';
+                $class = $frame['class'] ?? '';
+                
+                $text .= "   #{$index} ";
+                if ($class) {
+                    $text .= "{$class}::";
+                }
+                $text .= "{$function}()\n";
+                $text .= "       at " . basename($file);
+                if ($line > 0) {
+                    $text .= ":{$line}";
+                }
+                $text .= "\n";
+            }
+        }
+        
+        if (count($trace) > 10) {
+            $text .= "   ... and " . (count($trace) - 10) . " more frames\n";
+        }
+        
+        return $text;
+    }
+
+    /**
+     * Get appropriate icon for entry type
+     */
+    private function getEntryTypeIcon(string $type): string
+    {
+        return match(strtolower($type)) {
+            'request' => '🌐',
+            'query' => '🗄️',
+            'job' => '⚙️',
+            'cache' => '💾',
+            'exception' => '🚨',
+            'log' => '📝',
+            'notification' => '📧',
+            'event' => '⚡',
+            default => '📊'
+        };
+    }
+
+    /**
+     * Get priority icon based on pattern frequency and trend
+     */
+    private function getPatternPriorityIcon(int $count, string $trend): string
+    {
+        if ($count >= 50) {
+            return '🔥'; // High frequency
+        } elseif ($count >= 20) {
+            return '⚡'; // Medium-high frequency
+        } elseif ($count >= 10) {
+            return '⚠️'; // Medium frequency
+        } elseif (str_contains(strtolower($trend), 'increasing')) {
+            return '📈'; // Trending up
+        } else {
+            return '📊'; // Low frequency
+        }
+    }
 } 

@@ -1169,6 +1169,290 @@ class Database
     /**
      * Close database connection
      */
+    /**
+     * Get detailed information for a specific exception
+     * 
+     * @param string $exceptionId UUID of the exception
+     * @param bool $includeContext Include request context
+     * @param bool $includeRelated Include related entries
+     * @return array Exception detail with context and related entries
+     * @throws Exception If query fails
+     */
+    public function getExceptionDetail(string $exceptionId, bool $includeContext = true, bool $includeRelated = true): array
+    {
+        $this->connect();
+
+        try {
+            // Get the main exception entry
+            $stmt = $this->pdo->prepare("
+                SELECT uuid, content, created_at 
+                FROM telescope_entries 
+                WHERE uuid = ? AND type = 'exception'
+            ");
+            $stmt->execute([$exceptionId]);
+            $entry = $stmt->fetch();
+
+            if (!$entry) {
+                return [];
+            }
+
+            $content = json_decode($entry['content'], true);
+            if (!is_array($content)) {
+                return [];
+            }
+
+            $result = [
+                'exception' => [
+                    'uuid' => $entry['uuid'],
+                    'created_at' => $entry['created_at'],
+                    'class' => $content['class'] ?? 'Unknown',
+                    'message' => $content['message'] ?? 'No message',
+                    'file' => $content['file'] ?? 'Unknown',
+                    'line' => $content['line'] ?? 0,
+                    'level' => $content['level'] ?? 'error',
+                    'trace' => $content['trace'] ?? []
+                ]
+            ];
+
+            // Get request context if requested
+            if ($includeContext) {
+                $result['context'] = $this->getExceptionRequestContext($entry['created_at']);
+            }
+
+            // Get related entries if requested
+            if ($includeRelated) {
+                $result['related'] = $this->getExceptionRelatedEntries($entry['created_at']);
+            }
+
+            return $result;
+
+        } catch (PDOException $e) {
+            throw new Exception("Failed to fetch exception details: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Get exception patterns and trends
+     * 
+     * @param string $timeWindow Time period (1h, 24h, 7d, 30d)
+     * @param int $minOccurrences Minimum occurrences to be considered a pattern
+     * @param string $groupBy Group by 'class', 'file', or 'line'
+     * @return array Exception patterns with trend analysis
+     * @throws Exception If query fails
+     */
+    public function getExceptionPatterns(string $timeWindow = '24h', int $minOccurrences = 2, string $groupBy = 'class'): array
+    {
+        $this->connect();
+
+        try {
+            $hours = $this->parseSinceToHours($timeWindow);
+            $cutoffTime = date('Y-m-d H:i:s', strtotime("-{$hours} hours"));
+
+            // Build grouping field based on groupBy parameter
+            $groupField = match($groupBy) {
+                'file' => "JSON_UNQUOTE(JSON_EXTRACT(content, '$.file'))",
+                'line' => "CONCAT(JSON_UNQUOTE(JSON_EXTRACT(content, '$.file')), ':', JSON_UNQUOTE(JSON_EXTRACT(content, '$.line')))",
+                default => "JSON_UNQUOTE(JSON_EXTRACT(content, '$.class'))"
+            };
+
+            $stmt = $this->pdo->prepare("
+                SELECT 
+                    {$groupField} as identifier,
+                    COUNT(*) as count,
+                    MIN(created_at) as first_seen,
+                    MAX(created_at) as last_seen
+                FROM telescope_entries 
+                WHERE type = 'exception' 
+                AND created_at >= ?
+                AND {$groupField} IS NOT NULL
+                GROUP BY {$groupField}
+                HAVING count >= ?
+                ORDER BY count DESC, last_seen DESC
+                LIMIT 20
+            ");
+            $stmt->execute([$cutoffTime, $minOccurrences]);
+            $patterns = $stmt->fetchAll();
+
+            // Add additional details and trend analysis for each pattern
+            foreach ($patterns as &$pattern) {
+                // Get additional details for this pattern
+                $detailStmt = $this->pdo->prepare("
+                    SELECT 
+                        JSON_UNQUOTE(JSON_EXTRACT(content, '$.class')) as exception_class,
+                        JSON_UNQUOTE(JSON_EXTRACT(content, '$.level')) as level,
+                        JSON_UNQUOTE(JSON_EXTRACT(content, '$.message')) as message,
+                        JSON_UNQUOTE(JSON_EXTRACT(content, '$.file')) as file
+                    FROM telescope_entries 
+                    WHERE type = 'exception' 
+                    AND {$groupField} = ?
+                    AND created_at >= ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ");
+                $detailStmt->execute([$pattern['identifier'], $cutoffTime]);
+                $detail = $detailStmt->fetch();
+                
+                if ($detail) {
+                    $pattern['exception_class'] = $detail['exception_class'];
+                    $pattern['level'] = $detail['level'];
+                    $pattern['message'] = $detail['message'];
+                    
+                    // Get unique files for this pattern
+                    $filesStmt = $this->pdo->prepare("
+                        SELECT DISTINCT JSON_UNQUOTE(JSON_EXTRACT(content, '$.file')) as file
+                        FROM telescope_entries 
+                        WHERE type = 'exception' 
+                        AND {$groupField} = ?
+                        AND created_at >= ?
+                        AND JSON_UNQUOTE(JSON_EXTRACT(content, '$.file')) IS NOT NULL
+                    ");
+                    $filesStmt->execute([$pattern['identifier'], $cutoffTime]);
+                    $files = $filesStmt->fetchAll(PDO::FETCH_COLUMN);
+                    $pattern['files'] = $files;
+                } else {
+                    $pattern['exception_class'] = 'Unknown';
+                    $pattern['level'] = 'error';
+                    $pattern['message'] = '';
+                    $pattern['files'] = [];
+                }
+                
+                $pattern['trend'] = $this->calculateExceptionTrend($pattern['identifier'], $groupBy, $hours);
+            }
+
+            return $patterns;
+
+        } catch (PDOException $e) {
+            throw new Exception("Failed to analyze exception patterns: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Get request context around the time of an exception
+     */
+    private function getExceptionRequestContext(string $exceptionTime): array
+    {
+        // Look for request entries within 1 second of the exception
+        $stmt = $this->pdo->prepare("
+            SELECT content 
+            FROM telescope_entries 
+            WHERE type = 'request' 
+            AND ABS(TIMESTAMPDIFF(SECOND, created_at, ?)) <= 1
+            ORDER BY ABS(TIMESTAMPDIFF(SECOND, created_at, ?))
+            LIMIT 1
+        ");
+        $stmt->execute([$exceptionTime, $exceptionTime]);
+        $entry = $stmt->fetch();
+
+        if (!$entry) {
+            return [];
+        }
+
+        $content = json_decode($entry['content'], true);
+        if (!is_array($content)) {
+            return [];
+        }
+
+        return [
+            'method' => $content['method'] ?? 'UNKNOWN',
+            'uri' => $content['uri'] ?? 'UNKNOWN',
+            'status' => $content['response_status'] ?? $content['status'] ?? null,
+            'duration' => $content['duration'] ?? null,
+            'user_id' => $content['user']['id'] ?? null,
+            'ip_address' => $content['ip_address'] ?? null
+        ];
+    }
+
+    /**
+     * Get related telescope entries around the time of an exception
+     */
+    private function getExceptionRelatedEntries(string $exceptionTime): array
+    {
+        // Look for entries within 5 seconds of the exception
+        $stmt = $this->pdo->prepare("
+            SELECT type, content, created_at 
+            FROM telescope_entries 
+            WHERE type != 'exception' 
+            AND ABS(TIMESTAMPDIFF(SECOND, created_at, ?)) <= 5
+            ORDER BY ABS(TIMESTAMPDIFF(SECOND, created_at, ?)), created_at DESC
+            LIMIT 10
+        ");
+        $stmt->execute([$exceptionTime, $exceptionTime]);
+        $entries = $stmt->fetchAll();
+
+        $related = [];
+        foreach ($entries as $entry) {
+            $content = json_decode($entry['content'], true);
+            $summary = $this->generateEntrySummary($entry['type'], $content);
+            
+            $related[] = [
+                'type' => $entry['type'],
+                'created_at' => $entry['created_at'],
+                'summary' => $summary
+            ];
+        }
+
+        return $related;
+    }
+
+    /**
+     * Calculate trend for exception pattern
+     */
+    private function calculateExceptionTrend(string $identifier, string $groupBy, int $hours): string
+    {
+        $groupField = match($groupBy) {
+            'file' => "JSON_UNQUOTE(JSON_EXTRACT(content, '$.file'))",
+            'line' => "CONCAT(JSON_UNQUOTE(JSON_EXTRACT(content, '$.file')), ':', JSON_UNQUOTE(JSON_EXTRACT(content, '$.line')))",
+            default => "JSON_UNQUOTE(JSON_EXTRACT(content, '$.class'))"
+        };
+
+        // Get counts for first and second half of time period
+        $midPoint = $hours / 2;
+        $midPointTime = date('Y-m-d H:i:s', strtotime("-{$midPoint} hours"));
+        $cutoffTime = date('Y-m-d H:i:s', strtotime("-{$hours} hours"));
+
+        $stmt = $this->pdo->prepare("
+            SELECT 
+                SUM(CASE WHEN created_at < ? THEN 1 ELSE 0 END) as early_count,
+                SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) as recent_count
+            FROM telescope_entries 
+            WHERE type = 'exception' 
+            AND {$groupField} = ?
+            AND created_at >= ?
+        ");
+        $stmt->execute([$midPointTime, $midPointTime, $identifier, $cutoffTime]);
+        $trend = $stmt->fetch();
+
+        $earlyCount = (int)$trend['early_count'];
+        $recentCount = (int)$trend['recent_count'];
+
+        if ($recentCount > $earlyCount * 1.5) {
+            return 'Increasing';
+        } elseif ($earlyCount > $recentCount * 1.5) {
+            return 'Decreasing';
+        } else {
+            return 'Stable';
+        }
+    }
+
+    /**
+     * Generate a summary for different entry types
+     */
+    private function generateEntrySummary(string $type, ?array $content): string
+    {
+        if (!is_array($content)) {
+            return 'No details available';
+        }
+
+        return match($type) {
+            'request' => ($content['method'] ?? 'GET') . ' ' . ($content['uri'] ?? '/'),
+            'query' => substr($content['sql'] ?? 'SQL Query', 0, 50) . '...',
+            'job' => $content['name'] ?? 'Job',
+            'cache' => ($content['type'] ?? 'operation') . ' ' . ($content['key'] ?? 'cache key'),
+            'log' => substr($content['message'] ?? 'Log entry', 0, 50) . '...',
+            default => ucfirst($type) . ' entry'
+        };
+    }
+
     public function disconnect(): void
     {
         $this->pdo = null;
