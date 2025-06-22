@@ -951,10 +951,10 @@ class Database
 
             // Add user filter
             if ($userId !== null) {
-                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.user_id')) = ?";
+                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.user.id')) = ?";
                 $params[] = (string)$userId;
             } elseif (!$includeAnonymous) {
-                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.user_id')) IS NOT NULL";
+                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.user.id')) IS NOT NULL";
             }
 
             $whereClause = implode(' AND ', $whereConditions);
@@ -980,7 +980,7 @@ class Database
                     $activity = [
                         'uuid' => $entry['uuid'],
                         'created_at' => $entry['created_at'],
-                        'user_id' => $content['user_id'] ?? null,
+                        'user_id' => $content['user']['id'] ?? null,
                         'method' => $content['method'] ?? 'UNKNOWN',
                         'uri' => $content['uri'] ?? 'UNKNOWN',
                         'status' => $content['response_status'] ?? $content['status'] ?? null,
@@ -1029,10 +1029,10 @@ class Database
             $params = [$cutoffTime];
             
             if ($userId !== null) {
-                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.user_id')) = ?";
+                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.user.id')) = ?";
                 $params[] = (string)$userId;
             } else {
-                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.user_id')) IS NOT NULL";
+                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.user.id')) IS NOT NULL";
             }
             
             $whereClause = implode(' AND ', $whereConditions);
@@ -1042,7 +1042,7 @@ class Database
                 SELECT 
                     COUNT(*) as total_requests,
                     COUNT(DISTINCT JSON_UNQUOTE(JSON_EXTRACT(content, '$.ip_address'))) as unique_ips,
-                    COUNT(DISTINCT JSON_UNQUOTE(JSON_EXTRACT(content, '$.user_id'))) as unique_users,
+                    COUNT(DISTINCT JSON_UNQUOTE(JSON_EXTRACT(content, '$.user.id'))) as unique_users,
                     AVG(CAST(JSON_UNQUOTE(JSON_EXTRACT(content, '$.duration')) AS UNSIGNED)) as avg_duration,
                     MIN(created_at) as first_activity,
                     MAX(created_at) as last_activity
