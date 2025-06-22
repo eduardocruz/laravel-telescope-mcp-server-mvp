@@ -1,6 +1,6 @@
 {
     "name": "eduardocruz/laravel-telescope-mcp-server-mvp",
-    "version": "0.0.2",
+    "version": "0.0.3",
     "description": "A PHP MCP server for Laravel Telescope integration with Cursor IDE",
     "type": "project",
     "license": "MIT",
@@ -21,7 +21,8 @@
     },
     "scripts": {
         "serve": "php server.php",
-        "test-db": "php test-db.php"
+        "test-db": "php test-db.php",
+        "mcp:inspector": "npx @modelcontextprotocol/inspector php server.php"
     },
     "config": {
         "optimize-autoloader": true,
