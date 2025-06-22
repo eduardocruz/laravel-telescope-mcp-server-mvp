@@ -766,6 +766,166 @@ class Database
     }
 
     /**
+     * Get cache entries from telescope with filtering options
+     * 
+     * @param int $limit Number of cache operations to retrieve
+     * @param string|null $operation Filter by cache operation (hit, miss, write, forget, flush)
+     * @param int $hours Time window for analysis in hours
+     * @return array Array of cache entries with parsed data
+     * @throws Exception If query fails
+     */
+    public function getCacheEntries(int $limit = 50, ?string $operation = null, int $hours = 24): array
+    {
+        $this->connect();
+
+        try {
+            // Build the base query
+            $whereConditions = ["type = 'cache'"];
+            $params = [];
+
+            // Add time filter
+            $whereConditions[] = "created_at >= DATE_SUB(NOW(), INTERVAL ? HOUR)";
+            $params[] = $hours;
+
+            // Add operation filter if specified
+            if ($operation) {
+                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.type')) = ?";
+                $params[] = $operation;
+            }
+
+            $whereClause = implode(' AND ', $whereConditions);
+
+            $stmt = $this->pdo->prepare("
+                SELECT uuid, content, created_at 
+                FROM telescope_entries 
+                WHERE {$whereClause}
+                ORDER BY created_at DESC 
+                LIMIT ?
+            ");
+            
+            $params[] = $limit;
+            $stmt->execute($params);
+            
+            $entries = $stmt->fetchAll();
+            $cacheOps = [];
+            
+            foreach ($entries as $entry) {
+                $content = json_decode($entry['content'], true);
+                
+                if (is_array($content)) {
+                    $cacheOps[] = [
+                        'uuid' => $entry['uuid'],
+                        'created_at' => $entry['created_at'],
+                        'operation' => $content['type'] ?? 'unknown',
+                        'key' => $content['key'] ?? 'unknown',
+                        'value' => $content['value'] ?? null,
+                        'result' => $content['result'] ?? null,
+                        'expiration' => $content['expiration'] ?? null,
+                        'tags' => $content['tags'] ?? [],
+                        'hit' => ($content['type'] ?? '') === 'hit',
+                        'miss' => ($content['type'] ?? '') === 'miss'
+                    ];
+                }
+            }
+            
+            return $cacheOps;
+            
+        } catch (PDOException $e) {
+            throw new Exception("Failed to fetch cache entries: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Get cache statistics for summary analysis
+     * 
+     * @param int $hours Time window for analysis in hours
+     * @return array Cache statistics including hit/miss ratios
+     * @throws Exception If query fails
+     */
+    public function getCacheStats(int $hours = 24): array
+    {
+        $this->connect();
+
+        try {
+            $cutoffTime = date('Y-m-d H:i:s', strtotime("-{$hours} hours"));
+
+            // Get basic cache operation counts
+            $stmt = $this->pdo->prepare("
+                SELECT 
+                    JSON_UNQUOTE(JSON_EXTRACT(content, '$.type')) as operation_type,
+                    COUNT(*) as count
+                FROM telescope_entries 
+                WHERE type = 'cache' 
+                AND created_at >= ?
+                GROUP BY JSON_UNQUOTE(JSON_EXTRACT(content, '$.type'))
+            ");
+            $stmt->execute([$cutoffTime]);
+            $operationCounts = $stmt->fetchAll();
+
+            // Get most frequent cache keys
+            $stmt = $this->pdo->prepare("
+                SELECT 
+                    JSON_UNQUOTE(JSON_EXTRACT(content, '$.key')) as cache_key,
+                    COUNT(*) as frequency
+                FROM telescope_entries 
+                WHERE type = 'cache' 
+                AND created_at >= ?
+                GROUP BY JSON_UNQUOTE(JSON_EXTRACT(content, '$.key'))
+                ORDER BY frequency DESC
+                LIMIT 10
+            ");
+            $stmt->execute([$cutoffTime]);
+            $topKeys = $stmt->fetchAll();
+
+            // Calculate totals
+            $totalOps = 0;
+            $hits = 0;
+            $misses = 0;
+            $writes = 0;
+            $deletes = 0;
+
+            foreach ($operationCounts as $op) {
+                $count = (int)$op['count'];
+                $totalOps += $count;
+                
+                switch ($op['operation_type']) {
+                    case 'hit':
+                        $hits = $count;
+                        break;
+                    case 'miss':
+                        $misses = $count;
+                        break;
+                    case 'write':
+                    case 'put':
+                    case 'set':
+                        $writes = $count;
+                        break;
+                    case 'forget':
+                    case 'delete':
+                    case 'flush':
+                        $deletes = $count;
+                        break;
+                }
+            }
+
+            return [
+                'total_operations' => $totalOps,
+                'hits' => $hits,
+                'misses' => $misses,
+                'writes' => $writes,
+                'deletes' => $deletes,
+                'hit_rate' => $totalOps > 0 ? round(($hits / $totalOps) * 100, 1) : 0,
+                'miss_rate' => $totalOps > 0 ? round(($misses / $totalOps) * 100, 1) : 0,
+                'top_keys' => $topKeys,
+                'operation_counts' => $operationCounts
+            ];
+            
+        } catch (PDOException $e) {
+            throw new Exception("Failed to fetch cache statistics: " . $e->getMessage());
+        }
+    }
+
+    /**
      * Close database connection
      */
     public function disconnect(): void

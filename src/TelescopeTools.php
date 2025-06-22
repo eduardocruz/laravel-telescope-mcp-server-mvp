@@ -703,6 +703,225 @@ class TelescopeTools
     }
 
     /**
+     * Analyze cache performance and statistics from Laravel Telescope
+     * 
+     * @param int $limit Number of cache operations to analyze (default: 50)
+     * @param string|null $operation Filter by cache operation (hit, miss, write, forget, flush)
+     * @param int $hours Time window for analysis in hours (default: 24)
+     * @param bool $showSummary Include hit/miss ratio summary (default: true)
+     * @return array MCP response format
+     */
+    public function telescopeCacheStats(
+        int $limit = 50, 
+        ?string $operation = null, 
+        int $hours = 24, 
+        bool $showSummary = true
+    ): array {
+        try {
+            $cacheEntries = $this->database->getCacheEntries($limit, $operation, $hours);
+            $cacheStats = $showSummary ? $this->database->getCacheStats($hours) : null;
+            
+            if (empty($cacheEntries) && (!$cacheStats || $cacheStats['total_operations'] === 0)) {
+                $filterInfo = $this->buildCacheFilterInfo($operation, $hours);
+                return [
+                    'content' => [
+                        [
+                            'type' => 'text',
+                            'text' => "📭 No cache operations found{$filterInfo}."
+                        ]
+                    ]
+                ];
+            }
+            
+            $text = $this->formatCacheStatsOutput($cacheEntries, $cacheStats, $limit, $operation, $hours, $showSummary);
+            
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => $text
+                    ]
+                ]
+            ];
+            
+        } catch (Exception $e) {
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => "❌ Failed to fetch cache statistics: " . $e->getMessage()
+                    ]
+                ]
+            ];
+        }
+    }
+
+    /**
+     * Format cache statistics output for display
+     */
+    private function formatCacheStatsOutput(array $cacheEntries, ?array $cacheStats, int $limit, ?string $operation, int $hours, bool $showSummary): string
+    {
+        $filterInfo = $this->buildCacheFilterInfo($operation, $hours);
+        $count = count($cacheEntries);
+        
+        $text = "🔄 Cache Performance Analysis{$filterInfo}:\n\n";
+        
+        // Add summary if requested and available
+        if ($showSummary && $cacheStats && $cacheStats['total_operations'] > 0) {
+            $text .= "📊 Summary:\n";
+            $text .= "   Total Operations: " . number_format($cacheStats['total_operations']) . "\n";
+            
+            if ($cacheStats['hits'] > 0 || $cacheStats['misses'] > 0) {
+                $totalHitMiss = $cacheStats['hits'] + $cacheStats['misses'];
+                $text .= "   Hit Rate: {$cacheStats['hit_rate']}% ({$cacheStats['hits']}/{$totalHitMiss} operations)\n";
+                $text .= "   Miss Rate: {$cacheStats['miss_rate']}% ({$cacheStats['misses']}/{$totalHitMiss} operations)\n";
+            }
+            
+            if ($cacheStats['writes'] > 0) {
+                $text .= "   Writes: " . number_format($cacheStats['writes']) . "\n";
+            }
+            
+            if ($cacheStats['deletes'] > 0) {
+                $text .= "   Deletes: " . number_format($cacheStats['deletes']) . "\n";
+            }
+            
+            // Show most active cache key
+            if (!empty($cacheStats['top_keys'])) {
+                $topKey = $cacheStats['top_keys'][0];
+                $text .= "   Most Active Key: {$topKey['cache_key']} ({$topKey['frequency']} operations)\n";
+            }
+            
+            $text .= "\n";
+        }
+        
+        if (!empty($cacheEntries)) {
+            $text .= "Recent Operations (showing {$count}):\n\n";
+            
+            foreach ($cacheEntries as $entry) {
+                $operationIcon = $this->getCacheOperationIcon($entry['operation']);
+                $operationName = strtoupper($entry['operation']);
+                $text .= "{$operationIcon} {$operationName}: {$entry['key']}\n";
+                
+                // Show value size if available
+                if (!empty($entry['value'])) {
+                    $valueSize = $this->formatValueSize($entry['value']);
+                    if ($valueSize) {
+                        $text .= "   Value Size: {$valueSize}\n";
+                    }
+                }
+                
+                // Show expiration for writes
+                if ($entry['operation'] === 'write' && !empty($entry['expiration'])) {
+                    $text .= "   TTL: " . $this->formatExpiration($entry['expiration']) . "\n";
+                }
+                
+                // Show result for hits/misses
+                if (in_array($entry['operation'], ['hit', 'miss']) && !empty($entry['result'])) {
+                    $text .= "   Result: " . (is_string($entry['result']) ? $entry['result'] : 'Data retrieved') . "\n";
+                }
+                
+                // Show tags if available
+                if (!empty($entry['tags']) && is_array($entry['tags'])) {
+                    $text .= "   Tags: " . implode(', ', $entry['tags']) . "\n";
+                }
+                
+                $text .= "   Time: {$entry['created_at']}\n";
+                $text .= "   UUID: " . substr($entry['uuid'], 0, 8) . "...\n\n";
+            }
+        }
+        
+        return $text;
+    }
+
+    /**
+     * Build filter information string for cache output
+     */
+    private function buildCacheFilterInfo(?string $operation, int $hours): string
+    {
+        $filters = [];
+        
+        if ($operation) {
+            $filters[] = "operation: {$operation}";
+        }
+        
+        if ($hours !== 24) {
+            $filters[] = "last {$hours}h";
+        } else {
+            $filters[] = "last 24h";
+        }
+        
+        return !empty($filters) ? " (" . implode(', ', $filters) . ")" : "";
+    }
+
+    /**
+     * Get appropriate icon for cache operation
+     */
+    private function getCacheOperationIcon(string $operation): string
+    {
+        return match(strtolower($operation)) {
+            'hit' => '✅',
+            'miss' => '❌',
+            'write', 'put', 'set' => '💾',
+            'forget', 'delete' => '🗑️',
+            'flush' => '🧹',
+            'read' => '📖',
+            default => '❓'
+        };
+    }
+
+    /**
+     * Format value size for display
+     */
+    private function formatValueSize($value): ?string
+    {
+        if (is_string($value)) {
+            $bytes = strlen($value);
+        } elseif (is_array($value) || is_object($value)) {
+            $bytes = strlen(json_encode($value));
+        } else {
+            return null;
+        }
+        
+        if ($bytes < 1024) {
+            return $bytes . 'B';
+        } elseif ($bytes < 1024 * 1024) {
+            return round($bytes / 1024, 1) . 'KB';
+        } else {
+            return round($bytes / (1024 * 1024), 1) . 'MB';
+        }
+    }
+
+    /**
+     * Format expiration time for display
+     */
+    private function formatExpiration($expiration): string
+    {
+        if (is_numeric($expiration)) {
+            // If it's a timestamp
+            if ($expiration > time()) {
+                $seconds = $expiration - time();
+            } else {
+                $seconds = (int)$expiration;
+            }
+        } elseif (is_string($expiration)) {
+            // Try to parse as seconds
+            $seconds = (int)$expiration;
+        } else {
+            return 'Unknown';
+        }
+        
+        if ($seconds < 60) {
+            return $seconds . 's';
+        } elseif ($seconds < 3600) {
+            return round($seconds / 60) . 'm';
+        } elseif ($seconds < 86400) {
+            return round($seconds / 3600) . 'h';
+        } else {
+            return round($seconds / 86400) . 'd';
+        }
+    }
+
+    /**
      * Format exceptions output based on grouping preference
      */
     private function formatExceptionsOutput(array $exceptions, int $limit, ?string $level, ?string $since, ?string $groupBy): string
