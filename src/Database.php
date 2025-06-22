@@ -497,6 +497,161 @@ class Database
     }
 
     /**
+     * Get exceptions from telescope with filtering and grouping options
+     * 
+     * @param int $limit Number of exceptions to retrieve
+     * @param string|null $level Filter by error level (error, warning, critical, etc.)
+     * @param string|null $since Time period filter (1h, 24h, 7d)
+     * @param string|null $groupBy Group exceptions by 'type', 'file', or 'message'
+     * @return array Array of exception entries with parsed data
+     * @throws Exception If query fails
+     */
+    public function getExceptions(int $limit = 10, ?string $level = null, ?string $since = null, ?string $groupBy = null): array
+    {
+        $this->connect();
+
+        try {
+            // Build the base query
+            $whereConditions = ["type = 'exception'"];
+            $params = [];
+
+            // Add time filter if specified
+            if ($since) {
+                $hours = $this->parseSinceToHours($since);
+                $whereConditions[] = "created_at >= DATE_SUB(NOW(), INTERVAL ? HOUR)";
+                $params[] = $hours;
+            }
+
+            // Add level filter if specified
+            if ($level) {
+                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.level')) = ?";
+                $params[] = $level;
+            }
+
+            $whereClause = implode(' AND ', $whereConditions);
+
+            if ($groupBy) {
+                return $this->getGroupedExceptions($whereClause, $params, $limit, $groupBy);
+            } else {
+                return $this->getIndividualExceptions($whereClause, $params, $limit);
+            }
+
+        } catch (PDOException $e) {
+            throw new Exception("Failed to fetch exceptions: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Get individual exceptions without grouping
+     */
+    private function getIndividualExceptions(string $whereClause, array $params, int $limit): array
+    {
+        $stmt = $this->pdo->prepare("
+            SELECT uuid, content, created_at 
+            FROM telescope_entries 
+            WHERE {$whereClause}
+            ORDER BY created_at DESC 
+            LIMIT ?
+        ");
+        
+        $params[] = $limit;
+        $stmt->execute($params);
+        
+        $entries = $stmt->fetchAll();
+        $exceptions = [];
+        
+        foreach ($entries as $entry) {
+            $content = json_decode($entry['content'], true);
+            
+            if (is_array($content)) {
+                $exceptions[] = [
+                    'uuid' => $entry['uuid'],
+                    'created_at' => $entry['created_at'],
+                    'class' => $content['class'] ?? 'Unknown',
+                    'message' => $content['message'] ?? 'No message',
+                    'file' => $content['file'] ?? 'Unknown file',
+                    'line' => $content['line'] ?? 0,
+                    'level' => $content['level'] ?? 'error',
+                    'trace' => $content['trace'] ?? [],
+                    'context' => $content['context'] ?? []
+                ];
+            }
+        }
+        
+        return $exceptions;
+    }
+
+    /**
+     * Get exceptions grouped by specified field
+     */
+    private function getGroupedExceptions(string $whereClause, array $params, int $limit, string $groupBy): array
+    {
+        // Determine the JSON path for grouping
+        $groupField = match($groupBy) {
+            'type' => '$.class',
+            'file' => '$.file', 
+            'message' => '$.message',
+            default => '$.class'
+        };
+
+        $stmt = $this->pdo->prepare("
+            SELECT 
+                JSON_UNQUOTE(JSON_EXTRACT(content, '{$groupField}')) as group_key,
+                COUNT(*) as count,
+                MAX(created_at) as latest_occurrence,
+                ANY_VALUE(JSON_UNQUOTE(JSON_EXTRACT(content, '$.class'))) as class,
+                ANY_VALUE(JSON_UNQUOTE(JSON_EXTRACT(content, '$.message'))) as message,
+                ANY_VALUE(JSON_UNQUOTE(JSON_EXTRACT(content, '$.file'))) as file,
+                ANY_VALUE(JSON_EXTRACT(content, '$.line')) as line,
+                ANY_VALUE(JSON_UNQUOTE(JSON_EXTRACT(content, '$.level'))) as level,
+                ANY_VALUE(uuid) as uuid
+            FROM telescope_entries 
+            WHERE {$whereClause}
+            GROUP BY JSON_UNQUOTE(JSON_EXTRACT(content, '{$groupField}'))
+            ORDER BY count DESC, latest_occurrence DESC
+            LIMIT ?
+        ");
+        
+        $params[] = $limit;
+        $stmt->execute($params);
+        
+        $entries = $stmt->fetchAll();
+        $exceptions = [];
+        
+        foreach ($entries as $entry) {
+            $exceptions[] = [
+                'uuid' => $entry['uuid'],
+                'created_at' => $entry['latest_occurrence'],
+                'class' => $entry['class'] ?? 'Unknown',
+                'message' => $entry['message'] ?? 'No message',
+                'file' => $entry['file'] ?? 'Unknown file',
+                'line' => (int)($entry['line'] ?? 0),
+                'level' => $entry['level'] ?? 'error',
+                'count' => (int)$entry['count'],
+                'group_key' => $entry['group_key']
+            ];
+        }
+        
+        return $exceptions;
+    }
+
+    /**
+     * Parse time period string to hours
+     */
+    private function parseSinceToHours(string $since): int
+    {
+        return match($since) {
+            '1h' => 1,
+            '24h' => 24,
+            '7d' => 168, // 7 * 24
+            '1d' => 24,
+            '12h' => 12,
+            '3d' => 72,
+            default => 24 // Default to 24h if unrecognized
+        };
+    }
+
+    /**
      * Get database connection info
      * 
      * @return array Connection details

@@ -489,6 +489,174 @@ class TelescopeTools
     }
 
     /**
+     * Get application exceptions from Laravel Telescope
+     * 
+     * @param int $limit Number of exceptions to retrieve (default: 10)
+     * @param string|null $level Filter by error level (error, warning, critical, etc.)
+     * @param string|null $since Time period filter (1h, 24h, 7d)
+     * @param string|null $groupBy Group exceptions by 'type', 'file', or 'message'
+     * @return array MCP response format
+     */
+    public function telescopeExceptions(
+        int $limit = 10, 
+        ?string $level = null, 
+        ?string $since = null, 
+        ?string $groupBy = null
+    ): array {
+        try {
+            $exceptions = $this->database->getExceptions($limit, $level, $since, $groupBy);
+            
+            if (empty($exceptions)) {
+                $filterInfo = $this->buildFilterInfo($level, $since, $groupBy);
+                return [
+                    'content' => [
+                        [
+                            'type' => 'text',
+                            'text' => "📭 No exceptions found{$filterInfo}."
+                        ]
+                    ]
+                ];
+            }
+            
+            $text = $this->formatExceptionsOutput($exceptions, $limit, $level, $since, $groupBy);
+            
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => $text
+                    ]
+                ]
+            ];
+            
+        } catch (Exception $e) {
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => "❌ Failed to fetch exceptions: " . $e->getMessage()
+                    ]
+                ]
+            ];
+        }
+    }
+
+    /**
+     * Format exceptions output based on grouping preference
+     */
+    private function formatExceptionsOutput(array $exceptions, int $limit, ?string $level, ?string $since, ?string $groupBy): string
+    {
+        $filterInfo = $this->buildFilterInfo($level, $since, $groupBy);
+        $count = count($exceptions);
+        
+        if ($groupBy) {
+            $text = "🚨 Grouped Application Exceptions{$filterInfo} (showing {$count}):\n\n";
+            
+            foreach ($exceptions as $exception) {
+                $levelIcon = $this->getExceptionLevelIcon($exception['level']);
+                $text .= "{$levelIcon} {$exception['class']}: {$exception['message']}\n";
+                $text .= "   File: {$exception['file']}";
+                if ($exception['line'] > 0) {
+                    $text .= ":{$exception['line']}";
+                }
+                $text .= "\n";
+                $text .= "   Latest: {$exception['created_at']}\n";
+                $text .= "   Count: " . number_format($exception['count']) . " occurrences\n";
+                $text .= "   UUID: " . substr($exception['uuid'], 0, 8) . "...\n\n";
+            }
+        } else {
+            $text = "🚨 Recent Application Exceptions{$filterInfo} (showing {$count}):\n\n";
+            
+            foreach ($exceptions as $exception) {
+                $levelIcon = $this->getExceptionLevelIcon($exception['level']);
+                $text .= "{$levelIcon} {$exception['class']}: {$exception['message']}\n";
+                $text .= "   File: {$exception['file']}";
+                if ($exception['line'] > 0) {
+                    $text .= ":{$exception['line']}";
+                }
+                $text .= "\n";
+                $text .= "   Time: {$exception['created_at']}\n";
+                $text .= "   Level: {$exception['level']}\n";
+                $text .= "   UUID: " . substr($exception['uuid'], 0, 8) . "...\n";
+                
+                // Add stack trace preview if available
+                if (!empty($exception['trace']) && is_array($exception['trace'])) {
+                    $tracePreview = $this->formatStackTracePreview($exception['trace']);
+                    if ($tracePreview) {
+                        $text .= "   Stack: {$tracePreview}\n";
+                    }
+                }
+                
+                $text .= "\n";
+            }
+        }
+        
+        return $text;
+    }
+
+    /**
+     * Build filter information string for output
+     */
+    private function buildFilterInfo(?string $level, ?string $since, ?string $groupBy): string
+    {
+        $filters = [];
+        
+        if ($level) {
+            $filters[] = "level: {$level}";
+        }
+        
+        if ($since) {
+            $filters[] = "since: {$since}";
+        }
+        
+        if ($groupBy) {
+            $filters[] = "grouped by: {$groupBy}";
+        }
+        
+        return !empty($filters) ? " (" . implode(', ', $filters) . ")" : "";
+    }
+
+    /**
+     * Get appropriate icon for exception level
+     */
+    private function getExceptionLevelIcon(string $level): string
+    {
+        return match(strtolower($level)) {
+            'critical', 'fatal', 'emergency' => '🔴',
+            'error' => '❌',
+            'warning', 'warn' => '⚠️',
+            'notice', 'info' => 'ℹ️',
+            'debug' => '🐛',
+            default => '❓'
+        };
+    }
+
+    /**
+     * Format stack trace preview (first few frames)
+     */
+    private function formatStackTracePreview(array $trace): ?string
+    {
+        if (empty($trace)) {
+            return null;
+        }
+
+        // Get first meaningful stack frame
+        foreach (array_slice($trace, 0, 3) as $frame) {
+            if (is_array($frame) && isset($frame['file']) && isset($frame['line'])) {
+                $file = basename($frame['file']);
+                return "{$file}:{$frame['line']}";
+            } elseif (is_string($frame) && strpos($frame, '/') !== false) {
+                // Handle string format stack traces
+                if (preg_match('/([^\/]+\.php):(\d+)/', $frame, $matches)) {
+                    return "{$matches[1]}:{$matches[2]}";
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Get status icon based on HTTP status code
      * 
      * @param int|null $status HTTP status code
