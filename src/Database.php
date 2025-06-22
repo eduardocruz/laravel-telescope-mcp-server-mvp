@@ -236,6 +236,267 @@ class Database
     }
 
     /**
+     * Get comprehensive performance data from multiple telescope entry types
+     * 
+     * @param int $hours Time window for analysis in hours
+     * @param int $thresholdSlow Slow request threshold in milliseconds
+     * @param float $thresholdError Error rate threshold percentage
+     * @return array Comprehensive performance data
+     * @throws Exception If query fails
+     */
+    public function getPerformanceData(int $hours = 24, int $thresholdSlow = 1000, float $thresholdError = 5.0): array
+    {
+        $this->connect();
+
+        try {
+            $cutoffTime = date('Y-m-d H:i:s', strtotime("-{$hours} hours"));
+            
+            // HTTP Requests Performance
+            $requestsData = $this->getRequestsPerformance($cutoffTime, $thresholdSlow);
+            
+            // Database Performance
+            $databaseData = $this->getDatabasePerformance($cutoffTime);
+            
+            // Queue Performance
+            $queueData = $this->getQueuePerformance($cutoffTime);
+            
+            // Cache Performance
+            $cacheData = $this->getCachePerformance($cutoffTime);
+            
+            // Error Summary
+            $errorData = $this->getErrorSummary($cutoffTime);
+            
+            return [
+                'time_window' => $hours,
+                'cutoff_time' => $cutoffTime,
+                'requests' => $requestsData,
+                'database' => $databaseData,
+                'queue' => $queueData,
+                'cache' => $cacheData,
+                'errors' => $errorData,
+                'thresholds' => [
+                    'slow_request' => $thresholdSlow,
+                    'error_rate' => $thresholdError
+                ]
+            ];
+            
+        } catch (PDOException $e) {
+            throw new Exception("Failed to fetch performance data: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Get HTTP requests performance data
+     */
+    private function getRequestsPerformance(string $cutoffTime, int $thresholdSlow): array
+    {
+        // Total requests and success rate
+        $stmt = $this->pdo->prepare("
+            SELECT 
+                COUNT(*) as total_requests,
+                AVG(CAST(JSON_EXTRACT(content, '$.duration') AS DECIMAL(10,2))) as avg_duration,
+                COUNT(CASE WHEN CAST(JSON_EXTRACT(content, '$.response_status') AS UNSIGNED) BETWEEN 200 AND 299 THEN 1 END) as success_count,
+                COUNT(CASE WHEN CAST(JSON_EXTRACT(content, '$.duration') AS DECIMAL(10,2)) > ? THEN 1 END) as slow_count
+            FROM telescope_entries 
+            WHERE type = 'request' 
+            AND created_at >= ?
+        ");
+        $stmt->execute([$thresholdSlow, $cutoffTime]);
+        $basic = $stmt->fetch();
+
+        // Peak hour analysis
+        $stmt = $this->pdo->prepare("
+            SELECT 
+                HOUR(created_at) as hour,
+                COUNT(*) as count
+            FROM telescope_entries 
+            WHERE type = 'request' 
+            AND created_at >= ?
+            GROUP BY HOUR(created_at)
+            ORDER BY count DESC
+            LIMIT 1
+        ");
+        $stmt->execute([$cutoffTime]);
+        $peakHour = $stmt->fetch();
+
+        return [
+            'total' => (int)$basic['total_requests'],
+            'success_count' => (int)$basic['success_count'],
+            'success_rate' => $basic['total_requests'] > 0 ? round(($basic['success_count'] / $basic['total_requests']) * 100, 1) : 0,
+            'avg_duration' => round((float)$basic['avg_duration'], 1),
+            'slow_count' => (int)$basic['slow_count'],
+            'peak_hour' => $peakHour ? sprintf("%02d:00-%02d:00", $peakHour['hour'], $peakHour['hour'] + 1) : 'N/A',
+            'peak_requests' => $peakHour ? (int)$peakHour['count'] : 0
+        ];
+    }
+
+    /**
+     * Get database performance data
+     */
+    private function getDatabasePerformance(string $cutoffTime): array
+    {
+        $stmt = $this->pdo->prepare("
+            SELECT 
+                COUNT(*) as total_queries,
+                AVG(CAST(JSON_EXTRACT(content, '$.time') AS DECIMAL(10,2))) as avg_time,
+                COUNT(CASE WHEN CAST(JSON_EXTRACT(content, '$.time') AS DECIMAL(10,2)) > 100 THEN 1 END) as slow_count
+            FROM telescope_entries 
+            WHERE type = 'query' 
+            AND created_at >= ?
+        ");
+        $stmt->execute([$cutoffTime]);
+        $basic = $stmt->fetch();
+
+        // Most expensive query
+        $stmt = $this->pdo->prepare("
+            SELECT 
+                JSON_UNQUOTE(JSON_EXTRACT(content, '$.sql')) as query_sql,
+                CAST(JSON_EXTRACT(content, '$.time') AS DECIMAL(10,2)) as duration
+            FROM telescope_entries 
+            WHERE type = 'query' 
+            AND created_at >= ?
+            ORDER BY CAST(JSON_EXTRACT(content, '$.time') AS DECIMAL(10,2)) DESC
+            LIMIT 1
+        ");
+        $stmt->execute([$cutoffTime]);
+        $expensive = $stmt->fetch();
+
+        return [
+            'total_queries' => (int)$basic['total_queries'],
+            'avg_time' => round((float)$basic['avg_time'], 1),
+            'slow_count' => (int)$basic['slow_count'],
+            'most_expensive' => $expensive ? [
+                'sql' => substr($expensive['query_sql'], 0, 50) . '...',
+                'duration' => round((float)$expensive['duration'], 1)
+            ] : null
+        ];
+    }
+
+    /**
+     * Get queue performance data
+     */
+    private function getQueuePerformance(string $cutoffTime): array
+    {
+        $stmt = $this->pdo->prepare("
+            SELECT 
+                COUNT(*) as total_jobs,
+                AVG(CAST(JSON_EXTRACT(content, '$.time') AS DECIMAL(10,2))) as avg_time,
+                COUNT(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(content, '$.status')) = 'processed' THEN 1 END) as success_count
+            FROM telescope_entries 
+            WHERE type = 'job' 
+            AND created_at >= ?
+        ");
+        $stmt->execute([$cutoffTime]);
+        $basic = $stmt->fetch();
+
+        // Failed jobs
+        $stmt = $this->pdo->prepare("
+            SELECT 
+                JSON_UNQUOTE(JSON_EXTRACT(content, '$.name')) as job_name
+            FROM telescope_entries 
+            WHERE type = 'job' 
+            AND JSON_UNQUOTE(JSON_EXTRACT(content, '$.status')) = 'failed'
+            AND created_at >= ?
+            LIMIT 5
+        ");
+        $stmt->execute([$cutoffTime]);
+        $failed = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+        return [
+            'total_jobs' => (int)$basic['total_jobs'],
+            'success_count' => (int)$basic['success_count'],
+            'success_rate' => $basic['total_jobs'] > 0 ? round(($basic['success_count'] / $basic['total_jobs']) * 100, 1) : 0,
+            'avg_processing_time' => round((float)$basic['avg_time'] / 1000, 1), // Convert to seconds
+            'failed_jobs' => $failed
+        ];
+    }
+
+    /**
+     * Get cache performance data
+     */
+    private function getCachePerformance(string $cutoffTime): array
+    {
+        $stmt = $this->pdo->prepare("
+            SELECT 
+                COUNT(*) as total_operations,
+                COUNT(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(content, '$.type')) = 'hit' THEN 1 END) as hits,
+                COUNT(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(content, '$.type')) = 'miss' THEN 1 END) as misses
+            FROM telescope_entries 
+            WHERE type = 'cache' 
+            AND created_at >= ?
+        ");
+        $stmt->execute([$cutoffTime]);
+        $basic = $stmt->fetch();
+
+        // Most accessed cache keys
+        $stmt = $this->pdo->prepare("
+            SELECT 
+                JSON_UNQUOTE(JSON_EXTRACT(content, '$.key')) as cache_key,
+                COUNT(*) as access_count
+            FROM telescope_entries 
+            WHERE type = 'cache' 
+            AND created_at >= ?
+            GROUP BY JSON_UNQUOTE(JSON_EXTRACT(content, '$.key'))
+            ORDER BY access_count DESC
+            LIMIT 1
+        ");
+        $stmt->execute([$cutoffTime]);
+        $mostAccessed = $stmt->fetch();
+
+        return [
+            'total_operations' => (int)$basic['total_operations'],
+            'hits' => (int)$basic['hits'],
+            'misses' => (int)$basic['misses'],
+            'hit_rate' => $basic['total_operations'] > 0 ? round(($basic['hits'] / $basic['total_operations']) * 100, 1) : 0,
+            'miss_rate' => $basic['total_operations'] > 0 ? round(($basic['misses'] / $basic['total_operations']) * 100, 1) : 0,
+            'most_accessed' => $mostAccessed ? [
+                'key' => $mostAccessed['cache_key'],
+                'count' => (int)$mostAccessed['access_count']
+            ] : null
+        ];
+    }
+
+    /**
+     * Get error summary data
+     */
+    private function getErrorSummary(string $cutoffTime): array
+    {
+        $stmt = $this->pdo->prepare("
+            SELECT 
+                COUNT(*) as total_exceptions,
+                COUNT(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(content, '$.level')) = 'critical' THEN 1 END) as critical_count,
+                COUNT(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(content, '$.level')) = 'warning' THEN 1 END) as warning_count,
+                COUNT(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(content, '$.level')) = 'info' THEN 1 END) as info_count
+            FROM telescope_entries 
+            WHERE type = 'exception' 
+            AND created_at >= ?
+        ");
+        $stmt->execute([$cutoffTime]);
+        $basic = $stmt->fetch();
+
+        // Recent critical exceptions
+        $stmt = $this->pdo->prepare("
+            SELECT 
+                JSON_UNQUOTE(JSON_EXTRACT(content, '$.class')) as exception_class
+            FROM telescope_entries 
+            WHERE type = 'exception' 
+            AND JSON_UNQUOTE(JSON_EXTRACT(content, '$.level')) = 'critical'
+            AND created_at >= ?
+            LIMIT 3
+        ");
+        $stmt->execute([$cutoffTime]);
+        $critical = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+        return [
+            'total_exceptions' => (int)$basic['total_exceptions'],
+            'critical' => (int)$basic['critical_count'],
+            'warnings' => (int)$basic['warning_count'],
+            'info' => (int)$basic['info_count'],
+            'critical_exceptions' => $critical
+        ];
+    }
+
+    /**
      * Get database connection info
      * 
      * @return array Connection details

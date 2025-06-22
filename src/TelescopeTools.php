@@ -291,6 +291,204 @@ class TelescopeTools
     }
 
     /**
+     * Get comprehensive application performance dashboard
+     * 
+     * @param int $hours Time window for analysis in hours (default: 24)
+     * @param bool $includeDetails Include detailed breakdowns per category (default: false)
+     * @param int $thresholdSlow Slow request threshold in milliseconds (default: 1000)
+     * @param float $thresholdError Error rate threshold percentage (default: 5.0)
+     * @return array MCP response format
+     */
+    public function telescopePerformanceSummary(
+        int $hours = 24, 
+        bool $includeDetails = false, 
+        int $thresholdSlow = 1000, 
+        float $thresholdError = 5.0
+    ): array {
+        try {
+            $performanceData = $this->database->getPerformanceData($hours, $thresholdSlow, $thresholdError);
+            
+            $text = "📊 Application Performance Dashboard (last {$hours}h):\n\n";
+            
+            // HTTP Requests Section
+            $requests = $performanceData['requests'];
+            $text .= "🌐 HTTP Requests:\n";
+            $text .= "   Total: " . number_format($requests['total']) . " requests\n";
+            $text .= "   Success Rate: {$requests['success_rate']}% (" . number_format($requests['success_count']) . "/" . number_format($requests['total']) . ")\n";
+            $text .= "   Avg Response: {$requests['avg_duration']}ms\n";
+            $text .= "   Slow Requests: " . number_format($requests['slow_count']) . " (>{$thresholdSlow}ms)\n";
+            if ($requests['peak_hour'] !== 'N/A') {
+                $text .= "   Peak Hour: {$requests['peak_hour']} (" . number_format($requests['peak_requests']) . " requests)\n";
+            }
+            $text .= "\n";
+            
+            // Database Performance Section
+            $database = $performanceData['database'];
+            $text .= "🗄️ Database Performance:\n";
+            $text .= "   Total Queries: " . number_format($database['total_queries']) . "\n";
+            $text .= "   Avg Query Time: {$database['avg_time']}ms\n";
+            $text .= "   Slow Queries: " . number_format($database['slow_count']) . " (>100ms)\n";
+            if ($database['most_expensive']) {
+                $text .= "   Most Expensive: {$database['most_expensive']['sql']} ({$database['most_expensive']['duration']}ms)\n";
+            }
+            $text .= "\n";
+            
+            // Queue Status Section
+            $queue = $performanceData['queue'];
+            if ($queue['total_jobs'] > 0) {
+                $text .= "⚡ Queue Status:\n";
+                $text .= "   Jobs Processed: " . number_format($queue['total_jobs']) . "\n";
+                $text .= "   Success Rate: {$queue['success_rate']}% (" . number_format($queue['success_count']) . "/" . number_format($queue['total_jobs']) . ")\n";
+                $text .= "   Avg Processing: {$queue['avg_processing_time']}s\n";
+                if (!empty($queue['failed_jobs'])) {
+                    $text .= "   Failed Jobs: " . implode(', ', array_slice($queue['failed_jobs'], 0, 3)) . "\n";
+                }
+                $text .= "\n";
+            }
+            
+            // Cache Performance Section
+            $cache = $performanceData['cache'];
+            if ($cache['total_operations'] > 0) {
+                $text .= "🔄 Cache Performance:\n";
+                $text .= "   Operations: " . number_format($cache['total_operations']) . "\n";
+                $text .= "   Hit Rate: {$cache['hit_rate']}% (" . number_format($cache['hits']) . "/" . number_format($cache['total_operations']) . ")\n";
+                $text .= "   Miss Rate: {$cache['miss_rate']}% (" . number_format($cache['misses']) . "/" . number_format($cache['total_operations']) . ")\n";
+                if ($cache['most_accessed']) {
+                    $text .= "   Most Accessed: {$cache['most_accessed']['key']} (" . number_format($cache['most_accessed']['count']) . " hits)\n";
+                }
+                $text .= "\n";
+            }
+            
+            // Error Summary Section
+            $errors = $performanceData['errors'];
+            if ($errors['total_exceptions'] > 0) {
+                $text .= "🚨 Error Summary:\n";
+                $text .= "   Exceptions: " . number_format($errors['total_exceptions']) . " total\n";
+                if ($errors['critical'] > 0) {
+                    $text .= "   Critical: " . number_format($errors['critical']) . "\n";
+                    if (!empty($errors['critical_exceptions'])) {
+                        $text .= "     Types: " . implode(', ', array_slice($errors['critical_exceptions'], 0, 2)) . "\n";
+                    }
+                }
+                if ($errors['warnings'] > 0) {
+                    $text .= "   Warnings: " . number_format($errors['warnings']) . "\n";
+                }
+                if ($errors['info'] > 0) {
+                    $text .= "   Info: " . number_format($errors['info']) . "\n";
+                }
+                $text .= "\n";
+            }
+            
+            // Performance Trends Section
+            $text .= "📈 Performance Trends:\n";
+            
+            // Calculate error rate
+            $errorRate = $requests['total'] > 0 ? round((($requests['total'] - $requests['success_count']) / $requests['total']) * 100, 1) : 0;
+            
+            // Response time trend (simplified - would need historical data for real trends)
+            if ($requests['avg_duration'] > 500) {
+                $text .= "   🔴 Response time elevated ({$requests['avg_duration']}ms avg)\n";
+            } elseif ($requests['avg_duration'] > 200) {
+                $text .= "   🟡 Response time moderate ({$requests['avg_duration']}ms avg)\n";
+            } else {
+                $text .= "   🟢 Response time good ({$requests['avg_duration']}ms avg)\n";
+            }
+            
+            // Error rate assessment
+            if ($errorRate > $thresholdError) {
+                $text .= "   🔴 Error rate elevated ({$errorRate}%)\n";
+            } elseif ($errorRate > 1.0) {
+                $text .= "   🟡 Error rate within range ({$errorRate}%)\n";
+            } else {
+                $text .= "   🟢 Error rate low ({$errorRate}%)\n";
+            }
+            
+            // Cache performance assessment
+            if ($cache['total_operations'] > 0) {
+                if ($cache['hit_rate'] > 80) {
+                    $text .= "   🟢 Cache hit rate excellent ({$cache['hit_rate']}%)\n";
+                } elseif ($cache['hit_rate'] > 60) {
+                    $text .= "   🟡 Cache hit rate moderate ({$cache['hit_rate']}%)\n";
+                } else {
+                    $text .= "   🔴 Cache hit rate low ({$cache['hit_rate']}%)\n";
+                }
+            }
+            
+            // Queue processing assessment
+            if ($queue['total_jobs'] > 0) {
+                if ($queue['success_rate'] > 95) {
+                    $text .= "   🟢 Queue processing stable ({$queue['success_rate']}% success)\n";
+                } elseif ($queue['success_rate'] > 85) {
+                    $text .= "   🟡 Queue processing moderate ({$queue['success_rate']}% success)\n";
+                } else {
+                    $text .= "   🔴 Queue processing issues ({$queue['success_rate']}% success)\n";
+                }
+            }
+            
+            // Add detailed breakdown if requested
+            if ($includeDetails) {
+                $text .= "\n" . $this->formatDetailedBreakdown($performanceData);
+            }
+            
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => $text
+                    ]
+                ]
+            ];
+            
+        } catch (Exception $e) {
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => "❌ Failed to generate performance dashboard: " . $e->getMessage()
+                    ]
+                ]
+            ];
+        }
+    }
+
+    /**
+     * Format detailed performance breakdown
+     * 
+     * @param array $performanceData Raw performance data
+     * @return string Formatted detailed breakdown
+     */
+    private function formatDetailedBreakdown(array $performanceData): string
+    {
+        $text = "📋 Detailed Breakdown:\n\n";
+        
+        $text .= "⏱️ Time Analysis:\n";
+        $text .= "   Analysis Period: {$performanceData['time_window']} hours\n";
+        $text .= "   Data From: {$performanceData['cutoff_time']}\n";
+        $text .= "   Thresholds: Slow Request >{$performanceData['thresholds']['slow_request']}ms, Error Rate >{$performanceData['thresholds']['error_rate']}%\n\n";
+        
+        $requests = $performanceData['requests'];
+        $text .= "🌐 Request Details:\n";
+        $text .= "   Success Requests: " . number_format($requests['success_count']) . "\n";
+        $text .= "   Failed Requests: " . number_format($requests['total'] - $requests['success_count']) . "\n";
+        $text .= "   Slow Requests: " . number_format($requests['slow_count']) . "\n";
+        if ($requests['total'] > 0) {
+            $text .= "   Slow Request %: " . round(($requests['slow_count'] / $requests['total']) * 100, 1) . "%\n";
+        }
+        $text .= "\n";
+        
+        $database = $performanceData['database'];
+        $text .= "🗄️ Database Details:\n";
+        $text .= "   Total Queries: " . number_format($database['total_queries']) . "\n";
+        $text .= "   Fast Queries: " . number_format($database['total_queries'] - $database['slow_count']) . "\n";
+        $text .= "   Slow Queries: " . number_format($database['slow_count']) . "\n";
+        if ($database['total_queries'] > 0) {
+            $text .= "   Slow Query %: " . round(($database['slow_count'] / $database['total_queries']) * 100, 1) . "%\n";
+        }
+        
+        return $text;
+    }
+
+    /**
      * Get status icon based on HTTP status code
      * 
      * @param int|null $status HTTP status code

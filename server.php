@@ -59,7 +59,8 @@ try {
         ->withTool([TelescopeTools::class, 'telescopeStatus'], 'telescope_status', 'Check Laravel Telescope database connection and status')
         ->withTool([TelescopeTools::class, 'getRecentEntries'], 'get_recent_entries', 'Get recent telescope entries for testing')
         ->withTool([TelescopeTools::class, 'telescopeRecentRequests'], 'telescope_recent_requests', 'List recent HTTP requests from Laravel Telescope')
-        ->withTool([TelescopeTools::class, 'telescopeSlowQueries'], 'telescope_slow_queries', 'Find slow database queries from Laravel Telescope');
+        ->withTool([TelescopeTools::class, 'telescopeSlowQueries'], 'telescope_slow_queries', 'Find slow database queries from Laravel Telescope')
+        ->withTool([TelescopeTools::class, 'telescopePerformanceSummary'], 'telescope_performance_summary', 'Get comprehensive application performance dashboard from Laravel Telescope');
 
     // Start the server with stdio transport
     $exitCode = $server->run('stdio');
