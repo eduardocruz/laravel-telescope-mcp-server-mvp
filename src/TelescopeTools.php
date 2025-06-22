@@ -542,6 +542,167 @@ class TelescopeTools
     }
 
     /**
+     * Monitor job queue performance and status from Laravel Telescope
+     * 
+     * @param int $limit Number of jobs to retrieve (default: 10)
+     * @param string|null $status Filter by job status (pending, processing, completed, failed, cancelled)
+     * @param string|null $queue Filter by specific queue name
+     * @param int $hours Time window for analysis in hours (default: 24)
+     * @return array MCP response format
+     */
+    public function telescopeJobs(
+        int $limit = 10, 
+        ?string $status = null, 
+        ?string $queue = null, 
+        int $hours = 24
+    ): array {
+        try {
+            $jobs = $this->database->getJobs($limit, $status, $queue, $hours);
+            
+            if (empty($jobs)) {
+                $filterInfo = $this->buildJobFilterInfo($status, $queue, $hours);
+                return [
+                    'content' => [
+                        [
+                            'type' => 'text',
+                            'text' => "📭 No jobs found{$filterInfo}."
+                        ]
+                    ]
+                ];
+            }
+            
+            $text = $this->formatJobsOutput($jobs, $limit, $status, $queue, $hours);
+            
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => $text
+                    ]
+                ]
+            ];
+            
+        } catch (Exception $e) {
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => "❌ Failed to fetch jobs: " . $e->getMessage()
+                    ]
+                ]
+            ];
+        }
+    }
+
+    /**
+     * Format jobs output for display
+     */
+    private function formatJobsOutput(array $jobs, int $limit, ?string $status, ?string $queue, int $hours): string
+    {
+        $filterInfo = $this->buildJobFilterInfo($status, $queue, $hours);
+        $count = count($jobs);
+        
+        $text = "⚡ Job Queue Status{$filterInfo} (showing {$count} of {$limit}):\n\n";
+        
+        foreach ($jobs as $job) {
+            $statusIcon = $this->getJobStatusIcon($job['status']);
+            $text .= "{$statusIcon} {$job['job_name']} - " . ucfirst($job['status']) . "\n";
+            $text .= "   Queue: {$job['queue']}\n";
+            
+            // Show duration or processing time
+            if ($job['status'] === 'completed' || $job['status'] === 'failed') {
+                // For completed/failed jobs, we might not have duration in the telescope data
+                // but we can show when it was processed
+                $text .= "   Processed: {$job['created_at']}\n";
+            } elseif ($job['status'] === 'processing') {
+                $text .= "   Started: {$job['created_at']}\n";
+                // Calculate how long it's been processing
+                $startTime = new \DateTime($job['created_at']);
+                $now = new \DateTime();
+                $duration = $now->diff($startTime);
+                $text .= "   Duration: " . $this->formatDuration($duration) . " (ongoing)\n";
+            } else {
+                $text .= "   Time: {$job['created_at']}\n";
+            }
+            
+            // Show attempts for failed jobs
+            if ($job['status'] === 'failed' && $job['tries'] !== null && $job['max_tries'] !== null) {
+                $text .= "   Attempts: {$job['tries']}/{$job['max_tries']}\n";
+            }
+            
+            // Show error for failed jobs
+            if ($job['status'] === 'failed' && !empty($job['exception'])) {
+                $errorMessage = is_array($job['exception']) 
+                    ? ($job['exception']['message'] ?? 'Unknown error')
+                    : (string) $job['exception'];
+                $text .= "   Error: " . substr($errorMessage, 0, 100) . (strlen($errorMessage) > 100 ? '...' : '') . "\n";
+            }
+            
+            $text .= "   UUID: " . substr($job['uuid'], 0, 8) . "...\n\n";
+        }
+        
+        return $text;
+    }
+
+    /**
+     * Build filter information string for job output
+     */
+    private function buildJobFilterInfo(?string $status, ?string $queue, int $hours): string
+    {
+        $filters = [];
+        
+        if ($status) {
+            $filters[] = "status: {$status}";
+        }
+        
+        if ($queue) {
+            $filters[] = "queue: {$queue}";
+        }
+        
+        if ($hours !== 24) {
+            $filters[] = "last {$hours}h";
+        }
+        
+        return !empty($filters) ? " (" . implode(', ', $filters) . ")" : "";
+    }
+
+    /**
+     * Get appropriate icon for job status
+     */
+    private function getJobStatusIcon(string $status): string
+    {
+        return match(strtolower($status)) {
+            'completed' => '✅',
+            'failed' => '❌',
+            'processing' => '🔄',
+            'pending' => '⏳',
+            'cancelled' => '🚫',
+            'retry' => '🔁',
+            default => '❓'
+        };
+    }
+
+    /**
+     * Format duration object to readable string
+     */
+    private function formatDuration(\DateInterval $duration): string
+    {
+        $parts = [];
+        
+        if ($duration->h > 0) {
+            $parts[] = $duration->h . 'h';
+        }
+        if ($duration->i > 0) {
+            $parts[] = $duration->i . 'm';
+        }
+        if ($duration->s > 0 || empty($parts)) {
+            $parts[] = $duration->s . 's';
+        }
+        
+        return implode(' ', $parts);
+    }
+
+    /**
      * Format exceptions output based on grouping preference
      */
     private function formatExceptionsOutput(array $exceptions, int $limit, ?string $level, ?string $since, ?string $groupBy): string

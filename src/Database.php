@@ -668,6 +668,104 @@ class Database
     }
 
     /**
+     * Get job entries from telescope with filtering options
+     * 
+     * @param int $limit Number of jobs to retrieve
+     * @param string|null $status Filter by job status (pending, processing, completed, failed, cancelled)
+     * @param string|null $queue Filter by specific queue name
+     * @param int $hours Time window for analysis in hours
+     * @return array Array of job entries with parsed data
+     * @throws Exception If query fails
+     */
+    public function getJobs(int $limit = 10, ?string $status = null, ?string $queue = null, int $hours = 24): array
+    {
+        $this->connect();
+
+        try {
+            // Build the base query
+            $whereConditions = ["type = 'job'"];
+            $params = [];
+
+            // Add time filter
+            $whereConditions[] = "created_at >= DATE_SUB(NOW(), INTERVAL ? HOUR)";
+            $params[] = $hours;
+
+            // Add status filter if specified
+            if ($status) {
+                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.status')) = ?";
+                $params[] = $status;
+            }
+
+            // Add queue filter if specified
+            if ($queue) {
+                $whereConditions[] = "JSON_UNQUOTE(JSON_EXTRACT(content, '$.queue')) = ?";
+                $params[] = $queue;
+            }
+
+            $whereClause = implode(' AND ', $whereConditions);
+
+            $stmt = $this->pdo->prepare("
+                SELECT uuid, content, created_at 
+                FROM telescope_entries 
+                WHERE {$whereClause}
+                ORDER BY created_at DESC 
+                LIMIT ?
+            ");
+            
+            $params[] = $limit;
+            $stmt->execute($params);
+            
+            $entries = $stmt->fetchAll();
+            $jobs = [];
+            
+            foreach ($entries as $entry) {
+                $content = json_decode($entry['content'], true);
+                
+                if (is_array($content)) {
+                    // Parse job name from the class name
+                    $jobClass = $content['name'] ?? $content['displayName'] ?? 'Unknown Job';
+                    $jobName = $this->extractJobName($jobClass);
+                    
+                    $jobs[] = [
+                        'uuid' => $entry['uuid'],
+                        'created_at' => $entry['created_at'],
+                        'job_name' => $jobName,
+                        'job_class' => $jobClass,
+                        'queue' => $content['queue'] ?? 'default',
+                        'status' => $content['status'] ?? 'unknown',
+                        'connection' => $content['connection'] ?? null,
+                        'tries' => $content['tries'] ?? null,
+                        'max_tries' => $content['maxTries'] ?? null,
+                        'timeout' => $content['timeout'] ?? null,
+                        'failed_at' => $content['failed_at'] ?? null,
+                        'exception' => $content['exception'] ?? null,
+                        'data' => $content['data'] ?? []
+                    ];
+                }
+            }
+            
+            return $jobs;
+            
+        } catch (PDOException $e) {
+            throw new Exception("Failed to fetch job entries: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Extract a clean job name from the job class
+     */
+    private function extractJobName(string $jobClass): string
+    {
+        // If it's a full class name, get just the class name
+        if (str_contains($jobClass, '\\')) {
+            $parts = explode('\\', $jobClass);
+            return end($parts);
+        }
+        
+        return $jobClass;
+    }
+
+    /**
      * Close database connection
      */
     public function disconnect(): void
